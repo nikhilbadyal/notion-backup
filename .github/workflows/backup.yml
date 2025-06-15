@@ -1,0 +1,179 @@
+name: Notion Backup
+
+# ============================================================================
+# CONFIGURATION SECTION - Modify these values to customize the workflow
+# ============================================================================
+#
+# Schedule Options (modify the cron expression below):
+#   '0 2 * * *'     - Daily at 2 AM UTC
+#   '0 */6 * * *'   - Every 6 hours
+#   '0 2 * * 1'     - Weekly on Monday at 2 AM
+#   '0 2 1 * *'     - Monthly on the 1st at 2 AM
+#   '0 2 * * 0'     - Weekly on Sunday at 2 AM
+#
+# For simple mode: Set defaults in the env section below
+# For advanced mode: Use manual trigger with custom options
+# ============================================================================
+
+on:
+  # Modify this cron expression to change the backup schedule
+  schedule:
+    - cron: '30 5,17 * * *'  # Runs at 11:00 AM and 11:00 PM IST
+
+  # Manual trigger with full control
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Run in dry-run mode (skip Notion API)'
+        required: false
+        default: false
+        type: boolean
+      debug:
+        description: 'Enable debug logging'
+        required: false
+        default: false
+        type: boolean
+      upload_logs:
+        description: 'Upload logs as artifacts'
+        required: false
+        default: true
+        type: boolean
+      timeout_minutes:
+        description: 'Job timeout in minutes'
+        required: false
+        default: '30'
+        type: string
+
+env:
+  PYTHONUNBUFFERED: 1
+
+  # ========================================================================
+  # SIMPLE MODE CONFIGURATION - Change these defaults for simple operation
+  # ========================================================================
+  # When the workflow runs on schedule (not manual), it uses these defaults
+  # Modify these values to customize the automatic behavior:
+
+  DEFAULT_TIMEOUT: 30           # Job timeout in minutes
+  DEFAULT_UPLOAD_LOGS: true     # Upload logs as artifacts
+  DEFAULT_DEBUG: false          # Enable debug logging
+  DEFAULT_DRY_RUN: false        # Use dry-run mode (for testing)
+
+  # ========================================================================
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJson(github.event.inputs.timeout_minutes || '30') }}
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Show configuration
+      run: |
+        echo "🔧 Backup Configuration:"
+        echo "├── Dry Run: ${{ github.event.inputs.dry_run || env.DEFAULT_DRY_RUN }}"
+        echo "├── Debug: ${{ github.event.inputs.debug || env.DEFAULT_DEBUG }}"
+        echo "├── Upload Logs: ${{ github.event.inputs.upload_logs || env.DEFAULT_UPLOAD_LOGS }}"
+        echo "├── Timeout: ${{ github.event.inputs.timeout_minutes || env.DEFAULT_TIMEOUT }} minutes"
+        echo "├── Trigger: ${{ github.event_name }}"
+        echo "└── Runner: ${{ runner.os }}"
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        echo "✅ Dependencies installed"
+
+    - name: Create .env file from secret
+      run: |
+        echo "${{ secrets.ENVS }}" > .env
+
+        # Validate .env file
+        if [ ! -s .env ]; then
+          echo "❌ .env file is empty"
+          exit 1
+        fi
+
+        env_count=$(grep -c '=' .env || echo 0)
+        echo "✅ Environment file created with $env_count variables"
+
+        # Check for required variables (without showing values)
+        required_vars=("NOTION_SPACE_ID" "NOTION_TOKEN_V2" "NOTION_FILE_TOKEN")
+        for var in "${required_vars[@]}"; do
+          if grep -q "^${var}=" .env; then
+            echo "✅ $var is set"
+          else
+            echo "⚠️  $var is not found in .env"
+          fi
+        done
+
+    - name: Create logs directory
+      run: |
+        mkdir -p logs
+        echo "📁 Logs directory created"
+
+    - name: Setup Rclone
+      uses: AnimMouse/setup-rclone@v1
+      with:
+        rclone_config: ${{ secrets.RCLONE_CONFIG }}
+
+    - name: Run Notion Backup
+      id: backup
+      run: |
+        # Prepare command
+        cmd="python main.py"
+
+        if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+          cmd="$cmd --dry-run"
+          echo "🧪 Running in dry-run mode"
+        else
+          echo "🚀 Running full backup"
+        fi
+
+        if [ "${{ github.event.inputs.debug }}" = "true" ]; then
+          cmd="$cmd --debug"
+          echo "🔍 Debug logging enabled"
+        fi
+
+        # Run backup and capture output
+        echo "Executing: $cmd"
+        $cmd 2>&1 | tee logs/backup-$(date +%Y%m%d-%H%M%S).log
+
+        # Check exit code
+        if [ ${PIPESTATUS[0]} -eq 0 ]; then
+          echo "backup_status=success" >> $GITHUB_OUTPUT
+          echo "✅ Backup completed successfully"
+        else
+          echo "backup_status=failed" >> $GITHUB_OUTPUT
+          echo "❌ Backup failed"
+          exit 1
+        fi
+
+    - name: Upload logs
+      if: always() && (github.event.inputs.upload_logs == 'true' || github.event.inputs.upload_logs == '')
+      uses: actions/upload-artifact@v4
+      with:
+        name: backup-logs-${{ github.run_number }}
+        path: logs/
+        retention-days: 30
+
+    - name: Clean up sensitive files
+      if: always()
+      run: |
+        # Remove .env file for security
+        rm -f .env
+        echo "🧹 Cleaned up environment file"
+
+    - name: Notify on failure
+      if: failure()
+      run: |
+        echo "🚨 Backup job failed!"
+        echo "Check the logs for more details."
+        echo "Job URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
