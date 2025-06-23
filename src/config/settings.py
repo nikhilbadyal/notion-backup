@@ -1,5 +1,6 @@
 """Configuration settings for Notion Backup."""
 
+import re
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -200,8 +201,6 @@ class Settings(BaseSettings):
 
     def _mask_url(self, url: str) -> str:
         """Mask sensitive parts of notification URLs for logging."""
-        import re
-
         # Mask tokens/passwords in URLs (keep first 4 and last 4 characters)
         patterns = [
             # Telegram: tgram://token/chat_id

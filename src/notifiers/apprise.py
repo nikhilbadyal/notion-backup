@@ -1,5 +1,6 @@
 """Apprise notification backend."""
 
+import re
 from typing import Any
 
 from .base import AbstractNotifier, NotificationLevel, NotificationResult
@@ -45,8 +46,6 @@ class AppriseNotifier(AbstractNotifier):
 
     def _mask_url(self, url: str) -> str:
         """Mask sensitive parts of notification URLs for logging."""
-        import re
-
         # Mask tokens/passwords in URLs (keep first 4 and last 4 characters)
         patterns = [
             # Telegram: tgram://token/chat_id

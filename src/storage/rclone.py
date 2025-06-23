@@ -172,7 +172,7 @@ class RcloneStorage(AbstractStorage):
                     # Parse modification time
                     mod_time_str = file_info.get("ModTime", "")
                     try:
-                        mod_time = datetime.fromisoformat(mod_time_str.replace("Z", "+00:00"))
+                        mod_time = datetime.fromisoformat(mod_time_str)
                     except Exception:
                         mod_time = datetime.now(tz=UTC)
 
