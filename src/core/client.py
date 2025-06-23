@@ -167,60 +167,60 @@ class NotionClient:
 
     async def _poll_task_completion(self, task_id: str) -> int | None:
         """Poll for task completion and return the enqueuedAt timestamp."""
-        task_data = {
-            "taskIds": [task_id],
-        }
-
-        # Wait for export to complete (up to 10 minutes)
+        task_data = {"taskIds": [task_id]}
         max_wait_time = 1200  # 20 minutes
-        check_interval = 10  # Check every 10 seconds
+        check_interval = 10
         elapsed_time = 0
 
         while elapsed_time < max_wait_time:
-            try:
-                response = self.session.post(
-                    self.GET_TASKS_ENDPOINT,
-                    json=task_data,
-                    timeout=30,
-                )
-
-                if response.status_code == 429:
-                    logger.warning("Rate limit exceeded during polling.")
-                    return None
-
-                if response.status_code == 200:
-                    data = response.json()
-                    logger.debug("Task polling response: \n%s", json.dumps(data, indent=2))
-
-                    results = data.get("results", [])
-                    if results:
-                        task_result = results[0]
-                        task_state = task_result.get("state")
-
-                        if task_state == "success":
-                            enqueued_at = task_result.get("equeuedAt")
-                            if enqueued_at:
-                                logger.info("Task completed successfully. EnqueuedAt: %s", enqueued_at)
-                                return int(enqueued_at)
-                            logger.warning("Task completed but no enqueuedAt timestamp found")
-                            return None
-                        if task_state == "failure":
-                            logger.error("Export task failure")
-                            return None
-                        logger.info("Task state: %s. Continuing to poll...", task_state)
-
-                # Wait before next check
-                await asyncio.sleep(check_interval)
-                elapsed_time += check_interval
-
-                logger.info("Waiting for export task to complete... (%d seconds)", elapsed_time)
-
-            except Exception as e:
-                logger.warning("Error polling task status: %s", e)
-                await asyncio.sleep(check_interval)
-                elapsed_time += check_interval
+            result = await self._poll_once(task_data)
+            if result is not None:
+                return result
+            await asyncio.sleep(check_interval)
+            elapsed_time += check_interval
+            logger.info("Waiting for export task to complete... (%d seconds)", elapsed_time)
 
         logger.error("Export task did not complete within %d seconds", max_wait_time)
+        return None
+
+    async def _poll_once(self, task_data: dict[str, Any]) -> int | None:
+        """Poll Notion for task status once. Returns enqueuedAt if success/failure/invalid, None to continue polling."""
+        try:
+            response = self.session.post(
+                self.GET_TASKS_ENDPOINT,
+                json=task_data,
+                timeout=30,
+            )
+
+            if response.status_code == 429:
+                logger.warning("Rate limit exceeded during polling.")
+                return None
+
+            if response.status_code != 200:
+                return None
+
+            data = response.json()
+            logger.debug("Task polling response: \n%s", json.dumps(data, indent=2))
+            results = data.get("results", [])
+            if not results:
+                return None
+
+            task_result = results[0]
+            task_state = task_result.get("state")
+
+            if task_state == "success":
+                enqueued_at = task_result.get("equeuedAt")
+                if enqueued_at:
+                    logger.info("Task completed successfully. EnqueuedAt: %s", enqueued_at)
+                    return int(enqueued_at)
+                logger.warning("Task completed but no enqueuedAt timestamp found")
+                return None
+            if task_state == "failure":
+                logger.error("Export task failure")
+            logger.info("Task state: %s. Continuing to poll...", task_state)
+
+        except Exception as e:
+            logger.warning("Error polling task status: %s", e)
         return None
 
     async def get_notifications(self) -> dict[str, Any] | None:  # type: ignore[return]
