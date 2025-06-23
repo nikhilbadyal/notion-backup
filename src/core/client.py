@@ -3,8 +3,10 @@
 import asyncio
 import json
 import logging
-from datetime import UTC, datetime
+import time
+import uuid
 from pathlib import Path
+from typing import Any
 
 import requests
 
@@ -14,12 +16,17 @@ from src.utils import get_timestamp_string, retry_async
 logger = logging.getLogger(__name__)
 
 
+# noinspection PyBroadException
 class NotionClient:
     """Client for interacting with Notion's export API."""
 
-    ENQUEUE_ENDPOINT = "https://www.notion.so/api/v3/enqueueTask"
-    GET_TASKS_ENDPOINT = "https://www.notion.so/api/v3/getTasks"
-    NOTIFICATION_ENDPOINT = "https://www.notion.so/api/v3/getNotificationLogV2"
+    BASE_URL = "https://www.notion.so/api"
+    API_VERSION = "v3"
+    ENQUEUE_ENDPOINT = f"{BASE_URL}/{API_VERSION}/enqueueTask"
+    GET_TASKS_ENDPOINT = f"{BASE_URL}/{API_VERSION}/getTasks"
+    NOTIFICATION_ENDPOINT = f"{BASE_URL}/{API_VERSION}/getNotificationLogV2"
+    MARK_READ_ENDPOINT = f"{BASE_URL}/{API_VERSION}/saveTransactionsMain"
+    CONTENT_TYPE = "application/json"
 
     TOKEN_V2 = "token_v2"  # noqa: S105
     FILE_TOKEN = "file_token"  # noqa: S105
@@ -28,11 +35,15 @@ class NotionClient:
         """Initialize the Notion client."""
         self.settings = settings
         self.session = requests.Session()
+        self.export_notification_id: str | None = None  # Track notification ID for marking as read
 
         # Set up session with default headers
         self.session.headers.update(
             {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:139.0) Gecko/20100101 Firefox/139.0",
+                "x-notion-space-id": self.settings.notion_space_id,
+                "Cookie": f"{self.TOKEN_V2}={self.settings.notion_token_v2.get_secret_value()}",
+                "Content-Type": self.CONTENT_TYPE,
             },
         )
 
@@ -57,7 +68,7 @@ class NotionClient:
                 logger.error("Failed to trigger export task")
                 return None
 
-            logger.info("Export task triggered successfully with task ID: %s", task_id)
+            logger.debug("Export task triggered successfully with task ID: %s", task_id)
 
             # Phase 2: Poll for task completion
             enqueued_at = await self._poll_task_completion(task_id)
@@ -67,14 +78,32 @@ class NotionClient:
 
             logger.info("Export task completed at timestamp: %s", enqueued_at)
 
-            # Phase 3: Extract download URL from notifications
-            download_url = await self._extract_download_url(enqueued_at)
+            # Phase 3: Fetch notifications and extract download URL
+            max_retries = 20
+            base_delay = 5
+            max_delay = 60
+            download_url = None
+
+            for attempt in range(max_retries):
+                if attempt > 0:
+                    delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
+                    logger.info("Waiting %d seconds before retry %d/%d...", delay, attempt + 1, max_retries)
+                    await asyncio.sleep(delay)
+
+                notifications = await self.get_notifications()
+                if notifications:
+                    msg = f"Revived {len(notifications.get('notificationIds', {}))} notifications."
+                    logger.debug(msg)
+                    download_url = self.extract_download_url_from_notifications(notifications, enqueued_at)
+                    if download_url:
+                        logger.info("Download URL obtained")
+                        break
+                else:
+                    logger.info("No notifications received on attempt %d", attempt + 1)
+
             if not download_url:
                 logger.error("Failed to extract download URL")
                 return None
-
-            logger.info("Download URL obtained")
-
             # Phase 4: Download file
             return await self._download_file(download_url, temp_dir)
 
@@ -84,11 +113,6 @@ class NotionClient:
 
     async def _trigger_export_task(self) -> str | None:
         """Trigger the export task and return the task ID."""
-        headers = {
-            "Cookie": f"{self.TOKEN_V2}={self.settings.notion_token_v2.get_secret_value()}",
-            "Content-Type": "application/json",
-        }
-
         task_data = {
             "task": {
                 "eventName": "exportSpace",
@@ -114,7 +138,6 @@ class NotionClient:
             try:
                 response = self.session.post(
                     self.ENQUEUE_ENDPOINT,
-                    headers=headers,
                     json=task_data,
                     timeout=30,
                 )
@@ -144,11 +167,6 @@ class NotionClient:
 
     async def _poll_task_completion(self, task_id: str) -> int | None:
         """Poll for task completion and return the enqueuedAt timestamp."""
-        headers = {
-            "Cookie": f"{self.TOKEN_V2}={self.settings.notion_token_v2.get_secret_value()}",
-            "Content-Type": "application/json",
-        }
-
         task_data = {
             "taskIds": [task_id],
         }
@@ -162,7 +180,6 @@ class NotionClient:
             try:
                 response = self.session.post(
                     self.GET_TASKS_ENDPOINT,
-                    headers=headers,
                     json=task_data,
                     timeout=30,
                 )
@@ -206,13 +223,8 @@ class NotionClient:
         logger.error("Export task did not complete within %d seconds", max_wait_time)
         return None
 
-    async def _extract_download_url(self, enqueued_at: int) -> str | None:  # noqa: C901,PLR0912,PLR0915
-        """Extract download URL from notifications using enqueuedAt timestamp."""
-        headers = {
-            "Cookie": f"{self.TOKEN_V2}={self.settings.notion_token_v2.get_secret_value()}",
-            "Content-Type": "application/json",
-        }
-
+    async def get_notifications(self) -> dict[str, Any] | None:  # type: ignore[return]
+        """Fetch the latest notification log from Notion."""
         notification_data = {
             "spaceId": self.settings.notion_space_id,
             "size": 20,
@@ -220,145 +232,81 @@ class NotionClient:
             "variant": "no_grouping",
         }
 
-        max_retries = 20
-        base_delay = 5
-        max_delay = 60
+        try:
+            response = self.session.post(
+                self.NOTIFICATION_ENDPOINT,
+                json=notification_data,
+                timeout=30,
+            )
+            if response.status_code == 429:
+                logger.warning("Rate limit exceeded while fetching notifications.")
+                return None
+            if response.status_code == 200:
+                return response.json()  # type: ignore[no-any-return]
+            logger.warning("Failed to fetch notifications (HTTP %d): %s", response.status_code, response.text)
+        except Exception as e:
+            logger.warning("Exception fetching notifications: %s", e)
+        else:
+            return None
 
-        for attempt in range(max_retries):
-            try:
-                if attempt > 0:
-                    delay = min(base_delay * (2 ** (attempt - 1)), max_delay)
-                    logger.info("Waiting %d seconds before retry %d/%d...", delay, attempt + 1, max_retries)
-                    await asyncio.sleep(delay)
+    def extract_download_url_from_notifications(self, notifications: dict[str, Any], enqueued_at: int) -> str | None:
+        """
+        Extract download URL from notifications using enqueuedAt timestamp.
 
-                response = self.session.post(
-                    self.NOTIFICATION_ENDPOINT,
-                    headers=headers,
-                    json=notification_data,
-                    timeout=30,
-                )
+        Args:
+            notifications: The notification data dictionary.
+            enqueued_at: The timestamp when the export task was enqueued.
 
-                if response.status_code == 429:
-                    logger.warning(
-                        "Rate limit exceeded while fetching notifications (attempt %d/%d).",
-                        attempt + 1,
-                        max_retries,
-                    )
-                    return None
+        Returns
+        -------
+            The download URL as a string, or None if not found.
+        """
+        notification_map = notifications.get("recordMap", {}).get("notification", {})
 
-                activity = {}
-                if response.status_code == 200:
-                    data = response.json()
-                    logger.debug("Notification response received:\n%s", data)
+        # Find all export-completed activities after enqueued_at
+        matching_activities = []
+        for activity_data in notifications.get("recordMap", {}).get("activity", {}).values():
+            activity_value = activity_data.get("value", {})
+            if activity_value.get("type") == "export-completed":
+                try:
+                    activity_timestamp = int(activity_value.get("start_time", 0))
+                except (ValueError, TypeError):
+                    continue
+                time_diff = activity_timestamp - enqueued_at
+                if time_diff >= 0:
+                    matching_activities.append((time_diff, activity_value))
 
-                    record_map = data.get("recordMap", {})
-                    activity = record_map.get("activity", {})
+        if not matching_activities:
+            logger.warning("No matching export-completed activities found")
+            return None
 
-                    if not activity:
-                        if attempt < max_retries - 1:
-                            logger.info("No activities found yet, will retry...")
-                            continue
-                        logger.warning("No activity found in notifications after %d attempts", max_retries)
-                        return None
+        # Choose the nearest activity
+        _, best_match_activity = sorted(matching_activities, key=lambda x: abs(x[0]))[0]
+        activity_id = best_match_activity.get("id")
 
-                # Collect matching activities
-                matching_activities = []
-                all_export_activities = []
+        # Map activity to notification(s)
+        matched_notification_ids = [
+            notif_id
+            for notif_id, notif_obj in notification_map.items()
+            if notif_obj.get("value", {}).get("activity_id") == activity_id
+        ]
+        msg = f"Notification IDs referencing selected activity_id {activity_id}: {matched_notification_ids}"
+        logger.debug(msg)
 
-                for activity_data in activity.values():
-                    activity_value = activity_data.get("value", {})
-                    activity_type = activity_value.get("type")
-                    activity_id = activity_value.get("id")
+        edits = best_match_activity.get("edits", [])
+        if edits and edits[0].get("link"):
+            self.export_notification_id = matched_notification_ids[0] if matched_notification_ids else None
+            return str(edits[0]["link"])
 
-                    if activity_type == "export-completed":
-                        activity_timestamp = int(activity_value.get("start_time", 0))
-                        time_diff = activity_timestamp - enqueued_at
-                        readable_time = datetime.fromtimestamp(activity_timestamp / 1000, tz=UTC).isoformat()
-
-                        all_export_activities.append(
-                            {
-                                "id": activity_id,
-                                "timestamp": activity_timestamp,
-                                "time_diff": time_diff,
-                                "readable": readable_time,
-                            },
-                        )
-
-                        if time_diff >= 0:
-                            matching_activities.append(
-                                {
-                                    "activity": activity_value,
-                                    "timestamp": activity_timestamp,
-                                    "time_diff": time_diff,
-                                },
-                            )
-                            logger.debug(
-                                "✅ Candidate export-completed activity: ID=%s, Time=%s, Diff=%s ms",
-                                activity_id,
-                                readable_time,
-                                time_diff,
-                            )
-                        else:
-                            logger.debug(
-                                "⏪ Skipping export-completed activity before enqueued time: "
-                                "ID=%s, Time=%s, Diff=%s ms",
-                                activity_id,
-                                readable_time,
-                                time_diff,
-                            )
-
-                if not matching_activities and all_export_activities:
-                    logger.warning(
-                        "Found %d export-completed activities but none after enqueued_at (%s)",
-                        len(all_export_activities),
-                        datetime.fromtimestamp(enqueued_at / 1000, tz=UTC).isoformat(),
-                    )
-                    for act in all_export_activities:
-                        logger.info("Activity ID=%s, Time=%s, Diff=%s ms", act["id"], act["readable"], act["time_diff"])
-
-                best_match_activity = None
-                if matching_activities:
-                    matching_activities.sort(key=lambda x: (x["time_diff"] < 0, abs(x["time_diff"])))
-                    best_match_activity = matching_activities[0]["activity"]
-
-                    logger.info(
-                        "🎯 Selected activity ID=%s with time diff: %s ms (from %d candidates)",
-                        best_match_activity.get("id"),
-                        matching_activities[0]["time_diff"],
-                        len(matching_activities),
-                    )
-
-                    if matching_activities[0]["time_diff"] > 300000:  # more than 5 minutes late
-                        logger.warning("⚠️ Best match activity is more than 5 minutes after enqueue time!")
-
-                if best_match_activity:
-                    edits = best_match_activity.get("edits", [])
-                    if edits:
-                        download_link = edits[0].get("link")
-                        if download_link:
-                            logger.info("✅ Successfully extracted download URL")
-                            return str(download_link)
-                        logger.warning("❌ No download link found in activity edits")
-                    else:
-                        logger.warning("❌ No edits found in matching activity")
-                else:
-                    logger.warning(
-                        "❌ No matching export-completed activity found for enqueued_at %s",
-                        datetime.fromtimestamp(enqueued_at / 1000, tz=UTC).isoformat(),
-                    )
-
-            except Exception as e:
-                logger.warning("💥 Exception during download URL extraction: %s", e)
-
-        logger.error("🚫 Exhausted all retries without finding a valid download URL")
+        logger.warning("No download link found in edits")
         return None
 
     async def _download_file(self, download_url: str, temp_dir: Path) -> Path | None:
         """Download the export file."""
         try:
-            headers = {}
-            if self.settings.notion_file_token:
-                headers["Cookie"] = f"{self.FILE_TOKEN}={self.settings.notion_file_token.get_secret_value()}"
+            self.session.headers.update(
+                {"Cookie": f"{self.FILE_TOKEN}={self.settings.notion_file_token.get_secret_value()}"},
+            )
 
             # Generate filename
             timestamp = get_timestamp_string()
@@ -371,7 +319,6 @@ class NotionClient:
 
             response = self.session.get(
                 download_url,
-                headers=headers,
                 stream=True,
                 timeout=self.settings.download_timeout,
             )
@@ -390,7 +337,7 @@ class NotionClient:
                         # Log progress every 10MB
                         if downloaded % (10 * 1024 * 1024) == 0 and total_size > 0:
                             progress = (downloaded / total_size) * 100
-                            logger.info("Download progress: %.1f%% (%d/%d bytes)", progress, downloaded, total_size)
+                            logger.debug("Download progress: %.1f%% (%d/%d bytes)", progress, downloaded, total_size)
 
             file_size = file_path.stat().st_size
             logger.info("Download completed: %s (%d bytes)", filename, file_size)
@@ -400,3 +347,310 @@ class NotionClient:
             return None
         else:
             return file_path
+
+    async def mark_notifications_as_read(self) -> bool:
+        """
+        Mark stored notification ID as read.
+
+        Returns
+        -------
+            True if successful, False otherwise
+        """
+        if not self.export_notification_id:
+            logger.debug("No notification to mark as read")
+            return True
+
+        logger.debug("Marking export notification as read: %s", self.export_notification_id)
+
+        headers = {
+            "Cookie": f"{self.TOKEN_V2}={self.settings.notion_token_v2.get_secret_value()}",
+            "Content-Type": self.CONTENT_TYPE,
+        }
+
+        # Create operation for the notification
+        operations = [
+            {
+                "command": "update",
+                "pointer": {
+                    "table": "notification",
+                    "id": self.export_notification_id,
+                    "spaceId": self.settings.notion_space_id,
+                },
+                "path": [],
+                "args": {
+                    "read": True,
+                },
+            },
+        ]
+
+        # Create transaction data
+        transaction_data = {
+            "requestId": str(uuid.uuid4()),
+            "transactions": [
+                {
+                    "id": str(uuid.uuid4()),
+                    "spaceId": self.settings.notion_space_id,
+                    "debug": {
+                        "userAction": "InboxActionsMenu.toggleNotificationReadStatus",
+                    },
+                    "operations": operations,
+                },
+            ],
+        }
+
+        try:
+            response = self.session.post(
+                self.MARK_READ_ENDPOINT,
+                headers=headers,
+                json=transaction_data,
+                timeout=30,
+            )
+            response.raise_for_status()
+
+            if response.status_code != 200:
+                logger.warning(
+                    "Failed to mark notifications as read (HTTP %d): %s",
+                    response.status_code,
+                    response.text,
+                )
+                return False
+
+            # Clear the stored notification ID
+            self.export_notification_id = None
+
+        except Exception:
+            logger.exception("Exception while marking notifications as read")
+            return False
+        else:
+            return True
+
+    async def mark_notifications_as_unread(self) -> bool:
+        """
+        Mark stored notification ID as read.
+
+        Returns
+        -------
+            True if successful, False otherwise
+        """
+        if not self.export_notification_id:
+            logger.debug("No notification to mark as read")
+            return True
+
+        logger.info("Marking export notification as unread: %s", self.export_notification_id)
+
+        headers = {
+            "Cookie": f"{self.TOKEN_V2}={self.settings.notion_token_v2.get_secret_value()}",
+            "Content-Type": self.CONTENT_TYPE,
+        }
+
+        # Create operation for the notification
+        operations = [
+            {
+                "command": "update",
+                "pointer": {
+                    "table": "notification",
+                    "id": self.export_notification_id,
+                    "spaceId": self.settings.notion_space_id,
+                },
+                "path": [],
+                "args": {
+                    "read": False,
+                    "visited": False,  # Mark as unread
+                },
+            },
+        ]
+
+        # Create transaction data
+        transaction_data = {
+            "requestId": str(uuid.uuid4()),
+            "transactions": [
+                {
+                    "id": str(uuid.uuid4()),
+                    "spaceId": self.settings.notion_space_id,
+                    "debug": {
+                        "userAction": "InboxActionsMenu.toggleNotificationReadStatus",
+                    },
+                    "operations": operations,
+                },
+            ],
+        }
+
+        try:
+            response = self.session.post(
+                self.MARK_READ_ENDPOINT,
+                headers=headers,
+                json=transaction_data,
+                timeout=30,
+            )
+
+            if response.status_code != 200:
+                logger.warning(
+                    "Failed to mark notifications as unread (HTTP %d): %s",
+                    response.status_code,
+                    response.text,
+                )
+                return False
+
+            logger.info("✅ Successfully marked notification as unread")
+            # Clear the stored notification ID
+            self.export_notification_id = None
+
+        except Exception:
+            logger.exception("Exception while marking notifications as read")
+            return False
+        else:
+            return True
+
+    async def mark_notification_as_archived(self) -> bool:
+        """
+        Mark stored notification ID as archived.
+
+        Returns
+        -------
+            True if successful, False otherwise
+        """
+        if not self.export_notification_id:
+            logger.debug("No notification to archive")
+            return True
+
+        logger.info("Archiving export notification: %s", self.export_notification_id)
+
+        headers = {
+            "Cookie": f"{self.TOKEN_V2}={self.settings.notion_token_v2.get_secret_value()}",
+            "Content-Type": self.CONTENT_TYPE,
+        }
+
+        # Use current time in ms as archived_at
+        archived_at = int(time.time() * 1000)
+
+        operations = [
+            {
+                "command": "update",
+                "pointer": {
+                    "table": "notification",
+                    "id": self.export_notification_id,
+                    "spaceId": self.settings.notion_space_id,
+                },
+                "path": [],
+                "args": {
+                    "visited": True,
+                    "read": True,
+                    "archived_at": archived_at,
+                },
+            },
+        ]
+
+        transaction_data = {
+            "requestId": str(uuid.uuid4()),
+            "transactions": [
+                {
+                    "id": str(uuid.uuid4()),
+                    "spaceId": self.settings.notion_space_id,
+                    "debug": {
+                        "userAction": "InboxActionsMenu.handleArchive",
+                    },
+                    "operations": operations,
+                },
+            ],
+        }
+
+        try:
+            response = self.session.post(
+                self.MARK_READ_ENDPOINT,
+                headers=headers,
+                json=transaction_data,
+                timeout=30,
+            )
+
+            if response.status_code != 200:
+                logger.warning(
+                    "Failed to archive notification (HTTP %d): %s",
+                    response.status_code,
+                    response.text,
+                )
+                return False
+
+            logger.info("✅ Successfully archived notification")
+            # Clear the stored notification ID
+            self.export_notification_id = None
+
+        except Exception:
+            logger.exception("Exception while archiving notification")
+            return False
+        else:
+            return True
+
+    async def mark_notification_as_unarchived(self) -> bool:
+        """
+        Mark stored notification ID as unarchived.
+
+        Returns
+        -------
+            True if successful, False otherwise
+        """
+        if not self.export_notification_id:
+            logger.debug("No notification to unarchive")
+            return True
+
+        logger.info("Unarchiving export notification: %s", self.export_notification_id)
+
+        headers = {
+            "Cookie": f"{self.TOKEN_V2}={self.settings.notion_token_v2.get_secret_value()}",
+            "Content-Type": self.CONTENT_TYPE,
+        }
+
+        operations = [
+            {
+                "command": "update",
+                "pointer": {
+                    "table": "notification",
+                    "id": self.export_notification_id,
+                    "spaceId": self.settings.notion_space_id,
+                },
+                "path": [],
+                "args": {
+                    "visited": False,
+                    "archived_at": None,
+                },
+            },
+        ]
+
+        transaction_data = {
+            "requestId": str(uuid.uuid4()),
+            "transactions": [
+                {
+                    "id": str(uuid.uuid4()),
+                    "spaceId": self.settings.notion_space_id,
+                    "debug": {
+                        "userAction": "Activity.handleUnarchive",
+                    },
+                    "operations": operations,
+                },
+            ],
+        }
+
+        try:
+            response = self.session.post(
+                self.MARK_READ_ENDPOINT,
+                headers=headers,
+                json=transaction_data,
+                timeout=30,
+            )
+
+            if response.status_code != 200:
+                logger.warning(
+                    "Failed to unarchive notification (HTTP %d): %s",
+                    response.status_code,
+                    response.text,
+                )
+                return False
+
+            logger.info("✅ Successfully unarchived notification")
+            # Clear the stored notification ID
+            self.export_notification_id = None
+
+        except Exception:
+            logger.exception("Exception while unarchiving notification")
+            return False
+        else:
+            return True

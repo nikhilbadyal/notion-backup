@@ -19,6 +19,8 @@ on:
   # Modify this cron expression to change the backup schedule
   schedule:
     - cron: '30 5,17 * * *'  # Runs at 11:00 AM and 11:00 PM IST
+  repository_dispatch:  # Allows manual triggering from the repository
+    types: [backup]
 
   # Manual trigger with full control
   workflow_dispatch:

@@ -103,7 +103,6 @@ Created in dry-run mode at {timestamp}.
             True if backup was successful, False otherwise
         """
         backup_success = False
-        backup_file = None
         error_message = None
 
         try:
@@ -118,56 +117,24 @@ Created in dry-run mode at {timestamp}.
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
 
-                # Export from Notion or create dummy file
-                if dry_run:
-                    logger.info("Step 1: Creating dummy export file (DRY RUN MODE)...")
-                    backup_file = self._create_dummy_export(temp_path)
-                else:
-                    logger.info("Step 1: Exporting from Notion...")
-                    backup_file = await self.notion_client.export_workspace(temp_path)
-
-                    if not backup_file:
-                        error_message = "Failed to export from Notion"
-                        logger.error(error_message)
-                        return False
-
-                file_size = backup_file.stat().st_size
-                logger.info("Export completed: %s (%s)", backup_file.name, format_file_size(file_size))
-
-                # Store backup
-                logger.info("Step 2: Storing backup...")
-                storage_result = await self.storage.store(
-                    backup_file,
-                    destination_name=backup_file.name,
-                )
-
-                if not storage_result.success:
-                    error_message = f"Failed to store backup: {storage_result.message}"
-                    logger.error(error_message)
+                # Step 1: Export from Notion
+                backup_file = await self._handle_export(temp_path, dry_run)
+                if not backup_file:
                     return False
 
-                logger.info("Backup stored successfully: %s", storage_result.location or "Unknown location")
+                # Step 1.5: Mark notifications as read
+                await self._handle_notification_marking(dry_run)
 
-                # Cleanup old backups if configured
-                if self.settings.max_local_backups:
-                    logger.info("Step 3: Cleaning up old backups...")
-                    cleanup_result = await self.storage.cleanup_old_backups(
-                        self.settings.max_local_backups,
-                    )
+                # Step 2: Store backup
+                storage_location = await self._handle_storage(backup_file)
+                if not storage_location:
+                    return False
 
-                    if cleanup_result.success:
-                        logger.info("Cleanup completed: %s", cleanup_result.message)
-                    else:
-                        logger.warning("Cleanup failed: %s", cleanup_result.message)
-
-                backup_success = True
+                # Step 3: Cleanup old backups
+                await self._handle_cleanup()
 
                 # Send success notification
-                await self._send_success_notification(
-                    backup_file,
-                    storage_result.location or "Unknown location",
-                    dry_run=dry_run,
-                )
+                await self._send_success_notification(backup_file, storage_location, dry_run=dry_run)
 
                 logger.info("=" * 60)
                 logger.info("Backup Process Completed Successfully")
@@ -186,6 +153,69 @@ Created in dry-run mode at {timestamp}.
                 await self._send_error_notification(error_message)
 
         return backup_success
+
+    async def _handle_export(self, temp_path: Path, dry_run: bool) -> Path | None:
+        """Handle the export process and return the backup file path."""
+        backup_file: Path | None = None
+
+        if dry_run:
+            logger.info("Step 1: Creating dummy export file (DRY RUN MODE)...")
+            backup_file = self._create_dummy_export(temp_path)
+        else:
+            logger.info("Step 1: Exporting from Notion...")
+            backup_file = await self.notion_client.export_workspace(temp_path)
+
+            if not backup_file:
+                logger.error("Failed to export from Notion")
+                return None
+
+        # At this point backup_file is guaranteed to be Path, not None
+        if backup_file is None:
+            logger.error("Unexpected: backup_file is None after successful export")
+            return None
+
+        file_size = backup_file.stat().st_size
+        logger.info("Export completed: %s (%s)", backup_file.name, format_file_size(file_size))
+        return backup_file
+
+    async def _handle_notification_marking(self, dry_run: bool) -> None:
+        """Handle marking export notifications as read."""
+        if not dry_run and self.settings.mark_notifications_as_read:
+            logger.info("Step 1.5: Marking export notifications as read...")
+            mark_read_success = await self.notion_client.mark_notifications_as_read()
+            if mark_read_success:
+                logger.info("✅ Export notifications marked as read")
+            else:
+                logger.warning("⚠️ Failed to mark notifications as read (continuing with backup)")
+
+    async def _handle_storage(self, backup_file: Path) -> str | None:
+        """Handle storing the backup file and return the storage location."""
+        logger.info("Step 2: Storing backup...")
+        storage_result = await self.storage.store(
+            backup_file,
+            destination_name=backup_file.name,
+        )
+
+        if not storage_result.success:
+            logger.error("Failed to store backup: %s", storage_result.message)
+            return None
+
+        storage_location = storage_result.location or "Unknown location"
+        logger.info("Backup stored successfully: %s", storage_location)
+        return storage_location
+
+    async def _handle_cleanup(self) -> None:
+        """Handle cleanup of old backups if configured."""
+        if self.settings.max_local_backups:
+            logger.info("Step 3: Cleaning up old backups...")
+            cleanup_result = await self.storage.cleanup_old_backups(
+                self.settings.max_local_backups,
+            )
+
+            if cleanup_result.success:
+                logger.info("Cleanup completed: %s", cleanup_result.message)
+            else:
+                logger.warning("Cleanup failed: %s", cleanup_result.message)
 
     async def _test_connections(self, dry_run: bool = False) -> None:
         """Test all connections before starting backup."""

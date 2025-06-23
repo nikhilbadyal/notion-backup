@@ -82,6 +82,12 @@ class Settings(BaseSettings):
     keep_local_backup: bool = Field(default=True, description="Keep local backup after uploading to remote")
     max_local_backups: int | None = Field(default=None, description="Maximum number of local backups to keep")
 
+    # Notification Management
+    mark_notifications_as_read: bool = Field(
+        default=True,
+        description="Mark export notifications as read after successful download",
+    )
+
     @field_validator("local_path")
     @classmethod
     def validate_local_path(cls, v: Path) -> Path:

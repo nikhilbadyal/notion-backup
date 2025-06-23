@@ -14,6 +14,7 @@ A powerful, modular Python tool to automatically back up your Notion workspace w
 - 🧹 **Automatic cleanup** - Keep only the most recent backups
 - 📊 **Multiple export formats** - Markdown or HTML output
 - 🔄 **Retry logic** - Robust error handling with exponential backoff
+- 📬 **Smart notification management** - Automatically mark export notifications as read
 
 ## 🏗️ Architecture
 
@@ -186,11 +187,12 @@ APPRISE_URLS=discord://webhook_id/webhook_token,mailto://user:pass@smtp.gmail.co
 
 ### Advanced Settings
 
-| Variable           | Default | Description                     |
-|--------------------|---------|---------------------------------|
-| `MAX_RETRIES`      | `3`     | Max retry attempts              |
-| `RETRY_DELAY`      | `5`     | Delay between retries (seconds) |
-| `DOWNLOAD_TIMEOUT` | `300`   | Download timeout (seconds)      |
+| Variable                     | Default | Description                                      |
+|------------------------------|---------|--------------------------------------------------|
+| `MAX_RETRIES`                | `3`     | Max retry attempts                               |
+| `RETRY_DELAY`                | `5`     | Delay between retries (seconds)                  |
+| `DOWNLOAD_TIMEOUT`           | `300`   | Download timeout (seconds)                       |
+| `MARK_NOTIFICATIONS_AS_READ` | `true`  | Mark export notifications as read after download |
 
 ## 🔧 Command Line Usage
 
@@ -242,6 +244,7 @@ MAX_LOCAL_BACKUPS=7
 
 ENABLE_NOTIFICATIONS=true
 APPRISE_URLS=mailto://user:pass@gmail.com?to=you@gmail.com
+MARK_NOTIFICATIONS_AS_READ=true
 ```
 
 ### Cloud Backup with Discord Notifications
