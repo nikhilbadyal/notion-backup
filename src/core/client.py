@@ -348,26 +348,13 @@ class NotionClient:
         else:
             return file_path
 
-    async def mark_notifications_as_read(self) -> bool:
-        """
-        Mark stored notification ID as read.
-
-        Returns
-        -------
-            True if successful, False otherwise
-        """
+    async def _update_notification(self, args: dict[str, Any], debug_action: str) -> bool:
         if not self.export_notification_id:
-            logger.debug("No notification to mark as read")
+            logger.debug("No notification to update")
             return True
+        msg = f"Updating notification {self.export_notification_id} with args: {args}"
+        logger.debug(msg)
 
-        logger.debug("Marking export notification as read: %s", self.export_notification_id)
-
-        headers = {
-            "Cookie": f"{self.TOKEN_V2}={self.settings.notion_token_v2.get_secret_value()}",
-            "Content-Type": self.CONTENT_TYPE,
-        }
-
-        # Create operation for the notification
         operations = [
             {
                 "command": "update",
@@ -377,13 +364,10 @@ class NotionClient:
                     "spaceId": self.settings.notion_space_id,
                 },
                 "path": [],
-                "args": {
-                    "read": True,
-                },
+                "args": args,
             },
         ]
 
-        # Create transaction data
         transaction_data = {
             "requestId": str(uuid.uuid4()),
             "transactions": [
@@ -391,7 +375,7 @@ class NotionClient:
                     "id": str(uuid.uuid4()),
                     "spaceId": self.settings.notion_space_id,
                     "debug": {
-                        "userAction": "InboxActionsMenu.toggleNotificationReadStatus",
+                        "userAction": debug_action,
                     },
                     "operations": operations,
                 },
@@ -401,256 +385,50 @@ class NotionClient:
         try:
             response = self.session.post(
                 self.MARK_READ_ENDPOINT,
-                headers=headers,
                 json=transaction_data,
                 timeout=30,
             )
             response.raise_for_status()
-
             if response.status_code != 200:
+                msg = f"Failed to update notification (HTTP {response.status_code}): {response.text}"
                 logger.warning(
-                    "Failed to mark notifications as read (HTTP %d): %s",
-                    response.status_code,
-                    response.text,
+                    msg,
                 )
                 return False
-
-            # Clear the stored notification ID
             self.export_notification_id = None
-
         except Exception:
-            logger.exception("Exception while marking notifications as read")
+            logger.exception("Exception while updating notification")
             return False
         else:
             return True
+
+    async def mark_notifications_as_read(self) -> bool:
+        return await self._update_notification(
+            {"read": True},
+            "InboxActionsMenu.toggleNotificationReadStatus",
+        )
 
     async def mark_notifications_as_unread(self) -> bool:
-        """
-        Mark stored notification ID as read.
-
-        Returns
-        -------
-            True if successful, False otherwise
-        """
-        if not self.export_notification_id:
-            logger.debug("No notification to mark as read")
-            return True
-
-        logger.info("Marking export notification as unread: %s", self.export_notification_id)
-
-        headers = {
-            "Cookie": f"{self.TOKEN_V2}={self.settings.notion_token_v2.get_secret_value()}",
-            "Content-Type": self.CONTENT_TYPE,
-        }
-
-        # Create operation for the notification
-        operations = [
-            {
-                "command": "update",
-                "pointer": {
-                    "table": "notification",
-                    "id": self.export_notification_id,
-                    "spaceId": self.settings.notion_space_id,
-                },
-                "path": [],
-                "args": {
-                    "read": False,
-                    "visited": False,  # Mark as unread
-                },
-            },
-        ]
-
-        # Create transaction data
-        transaction_data = {
-            "requestId": str(uuid.uuid4()),
-            "transactions": [
-                {
-                    "id": str(uuid.uuid4()),
-                    "spaceId": self.settings.notion_space_id,
-                    "debug": {
-                        "userAction": "InboxActionsMenu.toggleNotificationReadStatus",
-                    },
-                    "operations": operations,
-                },
-            ],
-        }
-
-        try:
-            response = self.session.post(
-                self.MARK_READ_ENDPOINT,
-                headers=headers,
-                json=transaction_data,
-                timeout=30,
-            )
-
-            if response.status_code != 200:
-                logger.warning(
-                    "Failed to mark notifications as unread (HTTP %d): %s",
-                    response.status_code,
-                    response.text,
-                )
-                return False
-
-            logger.info("✅ Successfully marked notification as unread")
-            # Clear the stored notification ID
-            self.export_notification_id = None
-
-        except Exception:
-            logger.exception("Exception while marking notifications as read")
-            return False
-        else:
-            return True
+        return await self._update_notification(
+            {"read": False, "visited": False},
+            "InboxActionsMenu.toggleNotificationReadStatus",
+        )
 
     async def mark_notification_as_archived(self) -> bool:
-        """
-        Mark stored notification ID as archived.
-
-        Returns
-        -------
-            True if successful, False otherwise
-        """
-        if not self.export_notification_id:
-            logger.debug("No notification to archive")
-            return True
-
-        logger.info("Archiving export notification: %s", self.export_notification_id)
-
-        headers = {
-            "Cookie": f"{self.TOKEN_V2}={self.settings.notion_token_v2.get_secret_value()}",
-            "Content-Type": self.CONTENT_TYPE,
-        }
-
-        # Use current time in ms as archived_at
-        archived_at = int(time.time() * 1000)
-
-        operations = [
+        return await self._update_notification(
             {
-                "command": "update",
-                "pointer": {
-                    "table": "notification",
-                    "id": self.export_notification_id,
-                    "spaceId": self.settings.notion_space_id,
-                },
-                "path": [],
-                "args": {
-                    "visited": True,
-                    "read": True,
-                    "archived_at": archived_at,
-                },
+                "visited": True,
+                "read": True,
+                "archived_at": int(time.time() * 1000),
             },
-        ]
-
-        transaction_data = {
-            "requestId": str(uuid.uuid4()),
-            "transactions": [
-                {
-                    "id": str(uuid.uuid4()),
-                    "spaceId": self.settings.notion_space_id,
-                    "debug": {
-                        "userAction": "InboxActionsMenu.handleArchive",
-                    },
-                    "operations": operations,
-                },
-            ],
-        }
-
-        try:
-            response = self.session.post(
-                self.MARK_READ_ENDPOINT,
-                headers=headers,
-                json=transaction_data,
-                timeout=30,
-            )
-
-            if response.status_code != 200:
-                logger.warning(
-                    "Failed to archive notification (HTTP %d): %s",
-                    response.status_code,
-                    response.text,
-                )
-                return False
-
-            logger.info("✅ Successfully archived notification")
-            # Clear the stored notification ID
-            self.export_notification_id = None
-
-        except Exception:
-            logger.exception("Exception while archiving notification")
-            return False
-        else:
-            return True
+            "InboxActionsMenu.handleArchive",
+        )
 
     async def mark_notification_as_unarchived(self) -> bool:
-        """
-        Mark stored notification ID as unarchived.
-
-        Returns
-        -------
-            True if successful, False otherwise
-        """
-        if not self.export_notification_id:
-            logger.debug("No notification to unarchive")
-            return True
-
-        logger.info("Unarchiving export notification: %s", self.export_notification_id)
-
-        headers = {
-            "Cookie": f"{self.TOKEN_V2}={self.settings.notion_token_v2.get_secret_value()}",
-            "Content-Type": self.CONTENT_TYPE,
-        }
-
-        operations = [
+        return await self._update_notification(
             {
-                "command": "update",
-                "pointer": {
-                    "table": "notification",
-                    "id": self.export_notification_id,
-                    "spaceId": self.settings.notion_space_id,
-                },
-                "path": [],
-                "args": {
-                    "visited": False,
-                    "archived_at": None,
-                },
+                "visited": False,
+                "archived_at": None,
             },
-        ]
-
-        transaction_data = {
-            "requestId": str(uuid.uuid4()),
-            "transactions": [
-                {
-                    "id": str(uuid.uuid4()),
-                    "spaceId": self.settings.notion_space_id,
-                    "debug": {
-                        "userAction": "Activity.handleUnarchive",
-                    },
-                    "operations": operations,
-                },
-            ],
-        }
-
-        try:
-            response = self.session.post(
-                self.MARK_READ_ENDPOINT,
-                headers=headers,
-                json=transaction_data,
-                timeout=30,
-            )
-
-            if response.status_code != 200:
-                logger.warning(
-                    "Failed to unarchive notification (HTTP %d): %s",
-                    response.status_code,
-                    response.text,
-                )
-                return False
-
-            logger.info("✅ Successfully unarchived notification")
-            # Clear the stored notification ID
-            self.export_notification_id = None
-
-        except Exception:
-            logger.exception("Exception while unarchiving notification")
-            return False
-        else:
-            return True
+            "Activity.handleUnarchive",
+        )
