@@ -304,9 +304,7 @@ class NotionClient:
     async def _download_file(self, download_url: str, temp_dir: Path) -> Path | None:
         """Download the export file."""
         try:
-            self.session.headers.update(
-                {"Cookie": f"{self.FILE_TOKEN}={self.settings.notion_file_token.get_secret_value()}"},
-            )
+            headers = {"Cookie": f"{self.FILE_TOKEN}={self.settings.notion_file_token.get_secret_value()}"}
 
             # Generate filename
             timestamp = get_timestamp_string()
@@ -320,6 +318,7 @@ class NotionClient:
             response = self.session.get(
                 download_url,
                 stream=True,
+                headers=headers,
                 timeout=self.settings.download_timeout,
             )
             response.raise_for_status()
@@ -389,13 +388,6 @@ class NotionClient:
                 timeout=30,
             )
             response.raise_for_status()
-            if response.status_code != 200:
-                msg = f"Failed to update notification (HTTP {response.status_code}): {response.text}"
-                logger.warning(
-                    msg,
-                )
-                return False
-            self.export_notification_id = None
         except Exception:
             logger.exception("Exception while updating notification")
             return False
