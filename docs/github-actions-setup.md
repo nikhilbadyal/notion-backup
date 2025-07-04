@@ -10,24 +10,18 @@ This guide explains how to set up automated Notion backups using GitHub Actions 
 2. Click on **Settings** → **Secrets and variables** → **Actions**
 3. Click **New repository secret**
 4. Name: `ENVS`
-5. Value: Copy and paste your entire `.env` file content
+5. Value: Base64 encode the content of your entire `.env` file and paste the encoded string here.
 
-Example ENVS secret content:
+   **How to Base64 encode your `.env` file:**
+   ```bash
+   base64 -i .env
+   # On Windows (PowerShell):
+   # [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes(".env"))
+   ```
+
+Example ENVS secret content (after base64 encoding):
 ```
-NOTION_SPACE_ID=your_space_id_here
-NOTION_TOKEN_V2=your_token_v2_here
-NOTION_FILE_TOKEN=your_file_token_here
-NOTION_EXPORT_TYPE=markdown
-NOTION_FLATTEN_EXPORT_FILETREE=false
-NOTION_EXPORT_COMMENTS=true
-STORAGE_BACKEND=rclone
-RCLONE_REMOTE=r2
-RCLONE_PATH=notion
-RCLONE_CONFIG_PATH=~/.config/rclone/rclone.conf
-RCLONE_ADDITIONAL_ARGS=--verbose
-ENABLE_NOTIFICATIONS=true
-APPRISE_URLS=tgram://your_bot_token/your_chat_id
-MAX_BACKUPS=10
+Tk9USU9OX1NQQUNFX0lEPXlvdXJfc3BhY2VfaWRfaGVyZQpOT1RJT05fVE9LRU5fVjI9eW91cl90b2tlbl92Ml9oZXJlCk5PVElPTl9GSUxFX1RPS0VOPXlvdXJfZmlsZV90b2tlbl9oZXJlCk5PVElPTl9FWFBPUlRfVFlQRT1tYXJrZG93bgpOT1RJT05fRkxBVFRFTl9FWFBPUlRfRklMRVRSRUU9ZmFsc2UKTk9USU9OX0VYUE9SVF9DT01NRU5UUz10cnVlClNUT1JBR0VfQkFDS0VORD1yY2xvbmUKUkNMT05FX1JFTU9URT1yMgpSQ0xPTkVfUEFUSD1ub3Rpb24KUkNMT05FX0NPTkZJR19QQVRIPX4vLmNvbmZpZy9yY2xvbmUvcmNsb25lLmNvbmYKUkNMT05FX0FERElUSU9OQUxfQVJHUz0tLXZlcmJvc2UKRU5BQkxFX05PVElGSUNBVElPTlM9dHJ1ZQpBUFJSSVNFX1VSTFM9dGdyYW06Ly95b3VyX2JvdF90b2tlbi95b3VyX2NoYXRfaWQKTUFYX0JBQ0tVUFM9MTA=
 ```
 
 **⚠️ Important: List Variable Format**

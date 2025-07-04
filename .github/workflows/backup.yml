@@ -95,16 +95,9 @@ jobs:
 
     - name: Create .env file from secret
       run: |
-        echo "${{ secrets.ENVS }}" > .env
+        echo "${{ secrets.ENVS }}" | base64 -d > .env
 
-        # Validate .env file
-        if [ ! -s .env ]; then
-          echo "❌ .env file is empty"
-          exit 1
-        fi
-
-        env_count=$(grep -c '=' .env || echo 0)
-        echo "✅ Environment file created with $env_count variables"
+        echo "✅ Environment file created from secret."
 
         # Check for required variables (without showing values)
         required_vars=("NOTION_SPACE_ID" "NOTION_TOKEN_V2" "NOTION_FILE_TOKEN")
