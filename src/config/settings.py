@@ -81,7 +81,7 @@ class Settings(BaseSettings):
 
     # Cleanup Configuration
     keep_local_backup: bool = Field(default=True, description="Keep local backup after uploading to remote")
-    max_local_backups: int | None = Field(default=None, description="Maximum number of local backups to keep")
+    max_backups: int | None = Field(default=None, description="Maximum number of backups to keep")
 
     # Notification Management
     mark_notifications_as_read: bool = Field(
@@ -178,7 +178,7 @@ class Settings(BaseSettings):
         if self.storage_backend == StorageBackend.LOCAL:
             return {
                 "path": self.local_path,
-                "max_backups": self.max_local_backups,
+                "max_backups": self.max_backups,
             }
         if self.storage_backend == StorageBackend.RCLONE:
             return {

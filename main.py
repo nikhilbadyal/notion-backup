@@ -128,7 +128,6 @@ def list(_: click.Context) -> None:  # noqa: A001
 @click.option(
     "--keep",
     type=int,
-    default=5,
     help="Number of recent backups to keep",
     show_default=True,
 )
@@ -136,6 +135,8 @@ def list(_: click.Context) -> None:  # noqa: A001
 def cleanup(_: click.Context, keep: int) -> None:
     """Clean up old backups, keeping only the most recent ones."""
     settings = load_settings()
+    if not keep:
+        keep = settings.max_backups or 10  # Default to 10 if not specified
 
     click.echo(f"🧹 Cleaning up old backups (keeping {keep} most recent)...")
 

@@ -27,7 +27,7 @@ RCLONE_CONFIG_PATH=~/.config/rclone/rclone.conf
 RCLONE_ADDITIONAL_ARGS=--verbose
 ENABLE_NOTIFICATIONS=true
 APPRISE_URLS=tgram://your_bot_token/your_chat_id
-MAX_LOCAL_BACKUPS=10
+MAX_BACKUPS=10
 ```
 
 **⚠️ Important: List Variable Format**

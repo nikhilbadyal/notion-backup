@@ -206,10 +206,10 @@ Created in dry-run mode at {timestamp}.
 
     async def _handle_cleanup(self) -> None:
         """Handle cleanup of old backups if configured."""
-        if self.settings.max_local_backups:
+        if self.settings.max_backups:
             logger.info("Step 3: Cleaning up old backups...")
             cleanup_result = await self.storage.cleanup_old_backups(
-                self.settings.max_local_backups,
+                self.settings.max_backups,
             )
 
             if cleanup_result.success:

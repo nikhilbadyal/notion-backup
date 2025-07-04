@@ -106,7 +106,7 @@ Store backups on local filesystem:
 ```bash
 STORAGE_BACKEND=local
 LOCAL_PATH=./downloads
-MAX_LOCAL_BACKUPS=10
+MAX_BACKUPS=10
 ```
 
 ### Rclone Storage
@@ -161,11 +161,11 @@ APPRISE_URLS=discord://webhook_id/webhook_token,mailto://user:pass@smtp.gmail.co
 
 ### Storage Settings
 
-| Variable            | Default       | Description               |
-|---------------------|---------------|---------------------------|
-| `STORAGE_BACKEND`   | `local`       | `local`, `rclone`         |
-| `LOCAL_PATH`        | `./downloads` | Local storage directory   |
-| `MAX_LOCAL_BACKUPS` | `None`        | Max local backups to keep |
+| Variable          | Default       | Description               |
+|-------------------|---------------|---------------------------|
+| `STORAGE_BACKEND` | `local`       | `local`, `rclone`         |
+| `LOCAL_PATH`      | `./downloads` | Local storage directory   |
+| `MAX_BACKUPS`     | `None`        | Max local backups to keep |
 
 ### Rclone Settings
 
@@ -240,7 +240,7 @@ NOTION_FILE_TOKEN=your_file_token
 
 STORAGE_BACKEND=local
 LOCAL_PATH=./backups
-MAX_LOCAL_BACKUPS=7
+MAX_BACKUPS=7
 
 ENABLE_NOTIFICATIONS=true
 APPRISE_URLS=mailto://user:pass@gmail.com?to=you@gmail.com
