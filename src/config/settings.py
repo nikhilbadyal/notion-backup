@@ -88,6 +88,10 @@ class Settings(BaseSettings):
         default=True,
         description="Mark export notifications as read after successful download",
     )
+    archive_notification: bool = Field(
+        default=False,
+        description="Archive export notification after successful upload",
+    )
 
     @field_validator("local_path")
     @classmethod

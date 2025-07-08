@@ -158,6 +158,7 @@ APPRISE_URLS=discord://webhook_id/webhook_token,mailto://user:pass@smtp.gmail.co
 | `EXPORT_TYPE`             | `markdown` | `markdown`, `html` | Export format        |
 | `FLATTEN_EXPORT_FILETREE` | `false`    | `true`, `false`    | Flatten nested pages |
 | `EXPORT_COMMENTS`         | `true`     | `true`, `false`    | Include comments     |
+| `TIME_ZONE`               | `UTC`      | Any valid TZ name  | Timezone for export  |
 
 ### Storage Settings
 
@@ -193,6 +194,7 @@ APPRISE_URLS=discord://webhook_id/webhook_token,mailto://user:pass@smtp.gmail.co
 | `RETRY_DELAY`                | `5`     | Delay between retries (seconds)                  |
 | `DOWNLOAD_TIMEOUT`           | `300`   | Download timeout (seconds)                       |
 | `MARK_NOTIFICATIONS_AS_READ` | `true`  | Mark export notifications as read after download |
+| `ARCHIVE_NOTIFICATION`       | `false` | Archive export notification after upload         |
 
 ## 🔧 Command Line Usage
 

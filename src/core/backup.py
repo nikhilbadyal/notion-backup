@@ -130,6 +130,9 @@ Created in dry-run mode at {timestamp}.
                 if not storage_location:
                     return False
 
+                # Step 2.5: Archive notification
+                await self._handle_notification_archiving(dry_run)
+
                 # Step 3: Cleanup old backups
                 await self._handle_cleanup()
 
@@ -187,6 +190,16 @@ Created in dry-run mode at {timestamp}.
                 logger.info("✅ Export notifications marked as read")
             else:
                 logger.warning("⚠️ Failed to mark notifications as read (continuing with backup)")
+
+    async def _handle_notification_archiving(self, dry_run: bool) -> None:
+        """Handle archiving the export notification."""
+        if not dry_run and self.settings.archive_notification:
+            logger.info("Step 2.5: Archiving export notification...")
+            archive_success = await self.notion_client.mark_notification_as_archived()
+            if archive_success:
+                logger.info("✅ Export notification archived")
+            else:
+                logger.warning("⚠️ Failed to archive notification (continuing with backup)")
 
     async def _handle_storage(self, backup_file: Path) -> str | None:
         """Handle storing the backup file and return the storage location."""
