@@ -97,6 +97,41 @@ python main.py list
 python main.py cleanup --keep 5
 ```
 
+## 🐳 Docker
+
+This project is fully containerized, allowing you to run the backup tool in a consistent and isolated environment.
+
+### Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/)
+- [Docker Compose](https://docs.docker.com/compose/install/)
+
+### Running with Docker Compose
+
+1.  **Configure Environment:**
+    Create a `.env` file by copying the `.env.example` and filling in your Notion credentials and other settings.
+
+2.  **Build and Run:**
+    Use `docker-compose` to build the image and run the backup service.
+
+    ```bash
+    # Build the Docker image
+    docker-compose build
+
+    # Run a one-off backup
+    docker-compose run --rm notion-backup
+    ```
+
+### Scheduling Backups
+
+To run backups on a schedule, you can use a standard cron job on your host machine to execute the `docker-compose run` command.
+
+**Example Cron Job (daily at 2 AM):**
+
+```bash
+0 2 * * * cd /path/to/notion-backup && /usr/local/bin/docker-compose run --rm notion-backup
+```
+
 ## 📦 Storage Backends
 
 ### Local Storage

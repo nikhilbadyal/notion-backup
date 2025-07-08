@@ -1,0 +1,15 @@
+services:
+  notion-backup:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: notion-backup:latest
+    container_name: notion-backup
+    env_file:
+      - .env
+    volumes:
+      - ./downloads:/home/appuser/app/downloads
+      # Uncomment and update the path to your rclone.conf file.
+      # This will mount it to the correct location for the appuser.
+#      - .config/rclone/rclone.conf:/home/appuser/.config/rclone/rclone.conf
+    command: ["backup"]
