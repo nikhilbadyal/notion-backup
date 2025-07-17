@@ -11,6 +11,7 @@ from src.config import Settings
 from src.notifiers import AbstractNotifier, AppriseNotifier
 from src.storage import AbstractStorage, LocalStorage, RcloneStorage
 from src.utils import format_file_size, get_timestamp_string
+from src.utils.redis_client import RedisClient
 
 from .client import NotionClient
 
@@ -24,6 +25,7 @@ class BackupManager:
         """Initialize the backup manager."""
         self.settings = settings
         self.notion_client = NotionClient(settings)
+        self.redis_client = RedisClient(settings)
 
         # Initialize storage backend
         self.storage = self._create_storage_backend()
@@ -113,6 +115,10 @@ Created in dry-run mode at {timestamp}.
             # Test connections first
             await self._test_connections(dry_run=dry_run)
 
+            # Process recovery queue
+            if self.settings.redis_host:
+                await self._process_recovery_queue()
+
             # Create temporary directory for download
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
@@ -156,6 +162,120 @@ Created in dry-run mode at {timestamp}.
                 await self._send_error_notification(error_message)
 
         return backup_success
+
+    async def _process_recovery_queue(self) -> None:
+        """Process any pending exports from the Redis recovery queue."""
+        logger.info("Checking for pending exports in recovery queue...")
+        pending_exports = self.redis_client.get_pending_exports()
+
+        if not pending_exports:
+            logger.info("No pending exports found.")
+            return
+
+        logger.info("Found %d pending exports. Processing...", len(pending_exports))
+        successful_recoveries = 0
+
+        for export in pending_exports:
+            if await self._process_single_recovery(export):
+                successful_recoveries += 1
+
+        if successful_recoveries > 0:
+            logger.info("Successfully recovered %d pending exports", successful_recoveries)
+
+    async def _process_single_recovery(self, export: dict[str, Any]) -> bool:
+        """
+        Process a single pending export recovery.
+
+        Args:
+            export: Export data containing task_id, enqueued_at, and retry_count
+
+        Returns
+        -------
+            True if recovery was successful, False otherwise
+        """
+        task_id = export.get("task_id")
+        enqueued_at = export.get("enqueued_at")
+        retry_count = export.get("retry_count", 0)
+
+        if not task_id or not enqueued_at:
+            logger.warning("Invalid pending export data: %s", export)
+            return False
+
+        # Skip exports that have exceeded retry limit
+        if retry_count >= 3:
+            logger.warning("Export task %s exceeded retry limit (%d), removing from queue", task_id, retry_count)
+            return False
+
+        logger.info("Processing pending export task: %s (attempt %d)", task_id, retry_count + 1)
+
+        recovery_successful = await self._attempt_export_recovery(task_id, enqueued_at)
+
+        if not recovery_successful:
+            await self._handle_failed_recovery(task_id, enqueued_at, retry_count)
+
+        return recovery_successful
+
+    async def _attempt_export_recovery(self, task_id: str, enqueued_at: int) -> bool:
+        """
+        Attempt to recover a single export by checking notifications and downloading.
+
+        Args:
+            task_id: The export task ID
+            enqueued_at: When the task was enqueued
+
+        Returns
+        -------
+            True if recovery was successful, False otherwise
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            notifications = await self.notion_client.get_notifications()
+
+            if not notifications:
+                logger.warning("No notifications found for recovered task: %s", task_id)
+                return False
+
+            download_url = self.notion_client.extract_download_url_from_notifications(
+                notifications,
+                enqueued_at,
+            )
+
+            if not download_url:
+                logger.warning("Could not find download URL for recovered task: %s", task_id)
+                return False
+
+            backup_file = await self.notion_client._download_file(download_url, temp_path)  # noqa: SLF001
+
+            if not backup_file:
+                logger.error("Failed to download recovered backup for task: %s", task_id)
+                return False
+
+            await self._handle_storage(backup_file)
+            await self._handle_notification_marking(dry_run=False)
+            await self._handle_notification_archiving(dry_run=False)
+            logger.info("Successfully recovered and stored backup for task: %s", task_id)
+            return True
+
+    async def _handle_failed_recovery(self, task_id: str, enqueued_at: int, retry_count: int) -> None:
+        """
+        Handle a failed recovery attempt by re-queuing or discarding.
+
+        Args:
+            task_id: The export task ID
+            enqueued_at: When the task was enqueued
+            retry_count: Current retry count
+        """
+        retry_count += 1
+        if retry_count < 3:
+            logger.info("Re-queuing failed recovery for task %s (retry %d/3)", task_id, retry_count)
+            export_with_retry = {
+                "task_id": task_id,
+                "enqueued_at": enqueued_at,
+                "retry_count": retry_count,
+            }
+            self.redis_client.push_pending_export_with_retry(export_with_retry)
+        else:
+            logger.error("Task %s failed recovery after 3 attempts, discarding", task_id)
 
     async def _handle_export(self, temp_path: Path, dry_run: bool) -> Path | None:
         """Handle the export process and return the backup file path."""

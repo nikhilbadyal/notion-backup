@@ -12,6 +12,7 @@ import requests
 
 from src.config import Settings
 from src.utils import get_timestamp_string, retry_async
+from src.utils.redis_client import RedisClient
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ class NotionClient:
         self.settings = settings
         self.session = requests.Session()
         self.export_notification_id: str | None = None  # Track notification ID for marking as read
+        self.redis_client = RedisClient(settings)
 
         # Set up session with default headers
         self.session.headers.update(
@@ -79,8 +81,8 @@ class NotionClient:
             logger.info("Export task completed at timestamp: %s", enqueued_at)
 
             # Phase 3: Fetch notifications and extract download URL
-            max_retries = 20
-            base_delay = 5
+            max_retries = self.settings.max_retries
+            base_delay = self.settings.retry_delay
             max_delay = 60
             download_url = None
 
@@ -103,6 +105,8 @@ class NotionClient:
 
             if not download_url:
                 logger.error("Failed to extract download URL")
+                if self.settings.redis_host:
+                    self.redis_client.push_pending_export(task_id, enqueued_at)
                 return None
             # Phase 4: Download file
             return await self._download_file(download_url, temp_dir)

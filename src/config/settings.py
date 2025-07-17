@@ -5,7 +5,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -92,6 +92,37 @@ class Settings(BaseSettings):
         default=False,
         description="Archive export notification after successful upload",
     )
+
+    # Export Recovery
+    redis_host: str | None = Field(default=None, description="Redis host for export recovery")
+    redis_port: int = Field(default=6379, description="Redis port")
+    redis_db: int = Field(default=0, description="Redis database")
+    redis_username: str | None = Field(default=None, description="Redis username (for ACL)")
+    redis_password: SecretStr | None = Field(default=None, description="Redis password")
+    redis_ssl: bool = Field(default=False, description="Enable SSL/TLS for Redis connection")
+    redis_ssl_ca_certs: Path | None = Field(default=None, description="Path to Redis CA certificate file")
+    redis_ssl_cert_reqs: str = Field(
+        default="required",
+        description="SSL certificate requirements ('required', 'optional', 'none')",
+    )
+
+    @model_validator(mode="after")
+    def validate_redis_config(self) -> "Settings":
+        """Validate Redis configuration completeness."""
+        if self.redis_host:
+            if self.redis_port < 1 or self.redis_port > 65535:
+                msg = "redis_port must be between 1 and 65535"
+                raise ValueError(msg)
+            if self.redis_db < 0 or self.redis_db > 15:
+                msg = "redis_db must be between 0 and 15"
+                raise ValueError(msg)
+            if self.redis_ssl and self.redis_ssl_ca_certs and not self.redis_ssl_ca_certs.exists():
+                msg = f"Redis CA certificate file not found: {self.redis_ssl_ca_certs}"
+                raise ValueError(msg)
+            if self.redis_ssl_cert_reqs not in ["required", "optional", "none"]:
+                msg = "redis_ssl_cert_reqs must be 'required', 'optional', or 'none'"
+                raise ValueError(msg)
+        return self
 
     @field_validator("local_path")
     @classmethod

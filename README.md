@@ -15,6 +15,7 @@ A powerful, modular Python tool to automatically back up your Notion workspace w
 - 📊 **Multiple export formats** - Markdown or HTML output
 - 🔄 **Retry logic** - Robust error handling with exponential backoff
 - 📬 **Smart notification management** - Automatically mark export notifications as read
+- 🔄 **Export Recovery** - Optional Redis integration to recover from rare Notion notification failures
 
 ## 🏗️ Architecture
 
@@ -32,6 +33,7 @@ src/notion_backup/
 │   └── apprise.py  # Apprise notifications
 ├── config/         # Configuration management
 └── utils/          # Utility functions
+    └── redis_client.py # Optional Redis client for export recovery
 ```
 
 ## 🚀 Quick Start
@@ -108,10 +110,10 @@ This project is fully containerized, allowing you to run the backup tool in a co
 
 ### Running with Docker Compose
 
-1.  **Configure Environment:**
+1. **Configure Environment:**
     Create a `.env` file by copying the `.env.example` and filling in your Notion credentials and other settings.
 
-2.  **Build and Run:**
+2. **Build and Run:**
     Use `docker-compose` to build the image and run the backup service.
 
     ```bash
@@ -167,6 +169,7 @@ APPRISE_URLS=discord://webhook_id/webhook_token,mailto://user:pass@smtp.gmail.co
 ```
 
 **Popular notification services:**
+
 - **Discord:** `discord://webhook_id/webhook_token`
 - **Slack:** `slack://TokenA/TokenB/TokenC/Channel`
 - **Email:** `mailto://user:pass@domain.com?to=recipient@domain.com`
@@ -230,6 +233,23 @@ APPRISE_URLS=discord://webhook_id/webhook_token,mailto://user:pass@smtp.gmail.co
 | `DOWNLOAD_TIMEOUT`           | `300`   | Download timeout (seconds)                       |
 | `MARK_NOTIFICATIONS_AS_READ` | `true`  | Mark export notifications as read after download |
 | `ARCHIVE_NOTIFICATION`       | `false` | Archive export notification after upload         |
+
+### Export Recovery Settings (Optional)
+
+This feature uses Redis to recover from rare cases where a Notion export succeeds but the completion notification isn't received. When enabled, failed notifications are queued in Redis and processed on subsequent backup runs.
+
+| Variable              | Default    | Description                                                   |
+|-----------------------|------------|---------------------------------------------------------------|
+| `REDIS_HOST`          | None       | Redis server hostname (enables feature)                       |
+| `REDIS_PORT`          | 6379       | Redis port                                                    |
+| `REDIS_DB`            | 0          | Redis database number (0-15)                                  |
+| `REDIS_USERNAME`      | None       | Redis username (for ACL, Redis 6+)                            |
+| `REDIS_PASSWORD`      | None       | Redis password (optional)                                     |
+| `REDIS_SSL`           | false      | Enable SSL/TLS for Redis connection                           |
+| `REDIS_SSL_CA_CERTS`  | None       | Path to Redis CA certificate file                             |
+| `REDIS_SSL_CERT_REQS` | "required" | SSL certificate requirements ('required', 'optional', 'none') |
+
+**Note:** Redis is completely optional. If `REDIS_HOST` is not set, the feature is disabled and backups proceed normally. Install Redis via your package manager or Docker for production use. For TLS-enabled Redis servers (common in cloud providers), set `REDIS_SSL=true` and provide certificate details if required.
 
 ## 🔧 Command Line Usage
 
@@ -338,6 +358,7 @@ RETRY_DELAY=10
 ### Windows Task Scheduler
 
 Create a task that runs:
+
 ```
 Program: python
 Arguments: /path/to/notion-backup/main.py backup
@@ -348,20 +369,24 @@ Start in: /path/to/notion-backup
 
 ### Common Issues
 
-**"Configuration Error: Field required"**
+#### "Configuration Error: Field required"
+
 - Ensure all required environment variables are set
 - Check `.env` file syntax
 
-**"Storage connection failed"**
+#### "Storage connection failed"
+
 - For local: Check directory permissions
 - For rclone: Test rclone config with `rclone lsd remote:`
 
-**"Export task failed"**
+#### "Export task failed"
+
 - Token may have expired - get new tokens from browser
 - Check network connectivity
 - Verify space ID is correct
 
-**"Notification failed"**
+#### "Notification failed"
+
 - Test notification URLs independently
 - Check URL format in Apprise documentation
 
