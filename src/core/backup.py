@@ -128,6 +128,9 @@ Created in dry-run mode at {timestamp}.
                 if not backup_file:
                     return False
 
+                # Get file size before it's potentially deleted
+                file_size = backup_file.stat().st_size
+
                 # Step 1.5: Mark notifications as read
                 await self._handle_notification_marking(dry_run)
 
@@ -143,7 +146,12 @@ Created in dry-run mode at {timestamp}.
                 await self._handle_cleanup()
 
                 # Send success notification
-                await self._send_success_notification(backup_file, storage_location, dry_run=dry_run)
+                await self._send_success_notification(
+                    backup_file.name,
+                    file_size,
+                    storage_location,
+                    dry_run=dry_run,
+                )
 
                 logger.info("=" * 60)
                 logger.info("Backup Process Completed Successfully")
@@ -374,19 +382,23 @@ Created in dry-run mode at {timestamp}.
             else:
                 logger.warning("⚠ Notification connection failed: %s", notification_test.message)
 
-    async def _send_success_notification(self, backup_file: Path, storage_location: str, dry_run: bool = False) -> None:
+    async def _send_success_notification(
+        self,
+        backup_filename: str,
+        file_size: int,
+        storage_location: str,
+        dry_run: bool = False,
+    ) -> None:
         """Send success notification."""
         if not self.settings.enable_notifications:
             return
 
         try:
-            file_size = backup_file.stat().st_size
-
             title = "Backup Completed Successfully" + (" (DRY RUN)" if dry_run else "")
             message = (
                 f"Notion workspace backup completed successfully!\n\n"
                 f"{'🧪 MODE: DRY RUN (Dummy Export File)' + chr(10)*2 if dry_run else ''}"
-                f"📁 File: {backup_file.name}\n"
+                f"📁 File: {backup_filename}\n"
                 f"📊 Size: {format_file_size(file_size)}\n"
                 f"🏪 Storage: {self.settings.storage_backend.value}\n"
                 f"📍 Location: {storage_location}\n"
