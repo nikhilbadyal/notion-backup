@@ -231,6 +231,9 @@ APPRISE_URLS=discord://webhook_id/webhook_token,mailto://user:pass@smtp.gmail.co
 | `MAX_RETRIES`                | `3`     | Max retry attempts                               |
 | `RETRY_DELAY`                | `5`     | Delay between retries (seconds)                  |
 | `DOWNLOAD_TIMEOUT`           | `300`   | Download timeout (seconds)                       |
+| `MAX_EXPORT_WAIT_TIME`       | `3600`  | Max time to wait for export completion (seconds) |
+| `EXPORT_POLL_INTERVAL`       | `10`    | Interval between export checks (seconds)         |
+| `MAX_RETRY_DELAY`            | `300`   | Maximum delay between retries (seconds)          |
 | `MARK_NOTIFICATIONS_AS_READ` | `true`  | Mark export notifications as read after download |
 | `ARCHIVE_NOTIFICATION`       | `false` | Archive export notification after upload         |
 

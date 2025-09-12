@@ -79,6 +79,17 @@ class Settings(BaseSettings):
     retry_delay: int = Field(default=5, description="Delay between retries in seconds")
     download_timeout: int = Field(default=300, description="Download timeout in seconds")
 
+    # Export Timeout Configuration
+    max_export_wait_time: int = Field(
+        default=3600,
+        description="Maximum time to wait for export completion in seconds (default: 1 hour)",
+    )
+    export_poll_interval: int = Field(default=10, description="Interval between export completion checks in seconds")
+    max_retry_delay: int = Field(
+        default=300,
+        description="Maximum delay between retries in seconds (default: 5 minutes)",
+    )
+
     # Cleanup Configuration
     keep_local_backup: bool = Field(default=True, description="Keep local backup after uploading to remote")
     max_backups: int | None = Field(default=None, description="Maximum number of backups to keep")

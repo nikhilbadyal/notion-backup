@@ -83,7 +83,7 @@ class NotionClient:
             # Phase 3: Fetch notifications and extract download URL
             max_retries = self.settings.max_retries
             base_delay = self.settings.retry_delay
-            max_delay = 60
+            max_delay = self.settings.max_retry_delay
             download_url = None
 
             for attempt in range(max_retries):
@@ -172,8 +172,8 @@ class NotionClient:
     async def _poll_task_completion(self, task_id: str) -> int | None:
         """Poll for task completion and return the enqueuedAt timestamp."""
         task_data = {"taskIds": [task_id]}
-        max_wait_time = 1200  # 20 minutes
-        check_interval = 10
+        max_wait_time = self.settings.max_export_wait_time
+        check_interval = self.settings.export_poll_interval
         elapsed_time = 0
 
         while elapsed_time < max_wait_time:
@@ -184,7 +184,10 @@ class NotionClient:
             elapsed_time += check_interval
             logger.info("Waiting for export task to complete... (%d seconds)", elapsed_time)
 
-        logger.error("Export task did not complete within %d seconds", max_wait_time)
+        logger.error(
+            "Export task did not complete within %d seconds (configurable via MAX_EXPORT_WAIT_TIME)",
+            max_wait_time,
+        )
         return None
 
     async def _poll_once(self, task_data: dict[str, Any]) -> int | None:
