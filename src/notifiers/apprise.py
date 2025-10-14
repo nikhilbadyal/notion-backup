@@ -11,7 +11,7 @@ try:
     APPRISE_AVAILABLE = True
 except ImportError:
     APPRISE_AVAILABLE = False
-    apprise = None  # type: ignore[assignment]
+    apprise = None
 
 
 class AppriseNotifier(AbstractNotifier):
@@ -36,7 +36,7 @@ class AppriseNotifier(AbstractNotifier):
                 self.log("debug", f"Notification URLs (masked): {masked_urls}")
         else:
             self.log("error", "Apprise library not installed")
-            self.apprise = None  # type: ignore[assignment]
+            self.apprise = None
 
     def _add_urls(self) -> None:
         """Add configured URLs to Apprise."""
@@ -46,7 +46,6 @@ class AppriseNotifier(AbstractNotifier):
 
     def _mask_url(self, url: str) -> str:
         """Mask sensitive parts of notification URLs for logging."""
-        # Mask tokens/passwords in URLs (keep first 4 and last 4 characters)
         patterns = [
             # Telegram: tgram://token/chat_id
             (r"(tgram://)[^/]{8,}(/)", r"\g<1>****\g<2>"),
@@ -142,7 +141,7 @@ class AppriseNotifier(AbstractNotifier):
             self.log("error", f"Failed to add notification URL: {e}")
             return False
         else:
-            return result
+            return bool(result)
 
     def clear_urls(self) -> None:
         """Clear all notification URLs."""
