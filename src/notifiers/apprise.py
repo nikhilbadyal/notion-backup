@@ -1,9 +1,14 @@
 """Apprise notification backend."""
 
+from __future__ import annotations
+
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .base import AbstractNotifier, NotificationLevel, NotificationResult
+
+if TYPE_CHECKING:
+    import apprise as apprise_module
 
 try:
     import apprise
@@ -11,11 +16,13 @@ try:
     APPRISE_AVAILABLE = True
 except ImportError:
     APPRISE_AVAILABLE = False
-    apprise = None
+    apprise = None  # type: ignore[assignment]
 
 
 class AppriseNotifier(AbstractNotifier):
     """Apprise notification backend."""
+
+    apprise: apprise_module.Apprise | None
 
     def __init__(self, config: dict[str, Any], logger: Any = None) -> None:
         """Initialize Apprise notifier."""
@@ -40,6 +47,8 @@ class AppriseNotifier(AbstractNotifier):
 
     def _add_urls(self) -> None:
         """Add configured URLs to Apprise."""
+        if self.apprise is None:
+            return
         for url in self.urls:
             if url.strip():
                 self.apprise.add(url.strip())
@@ -65,8 +74,11 @@ class AppriseNotifier(AbstractNotifier):
 
         return masked_url
 
-    def _get_notification_type(self, level: NotificationLevel) -> apprise.NotifyType:
+    def _get_notification_type(self, level: NotificationLevel) -> apprise_module.NotifyType:
         """Map notification level to Apprise type."""
+        if apprise is None:
+            msg = "Apprise library not available"
+            raise RuntimeError(msg)
         mapping = {
             NotificationLevel.SUCCESS: apprise.NotifyType.SUCCESS,
             NotificationLevel.ERROR: apprise.NotifyType.FAILURE,
@@ -97,6 +109,8 @@ class AppriseNotifier(AbstractNotifier):
             full_title = f"{self.title}: {title}" if title else self.title
 
             # Send notification
+            if self.apprise is None:
+                return NotificationResult(success=False, message="Apprise not initialized")
             result = self.apprise.notify(
                 body=message,
                 title=full_title,
@@ -131,6 +145,9 @@ class AppriseNotifier(AbstractNotifier):
 
     def add_url(self, url: str) -> bool:
         """Add a new notification URL."""
+        if self.apprise is None:
+            self.log("error", "Apprise not initialized")
+            return False
         try:
             result = self.apprise.add(url)
             if result:
@@ -145,7 +162,8 @@ class AppriseNotifier(AbstractNotifier):
 
     def clear_urls(self) -> None:
         """Clear all notification URLs."""
-        self.apprise.clear()
+        if self.apprise is not None:
+            self.apprise.clear()
         self.urls.clear()
         self.log("info", "Cleared all notification URLs")
 
