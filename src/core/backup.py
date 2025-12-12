@@ -104,7 +104,6 @@ Created in dry-run mode at {timestamp}.
         -------
             True if backup was successful, False otherwise
         """
-        backup_success = False
         error_message = None
 
         try:
@@ -126,6 +125,7 @@ Created in dry-run mode at {timestamp}.
                 # Step 1: Export from Notion
                 backup_file = await self._handle_export(temp_path, dry_run)
                 if not backup_file:
+                    error_message = "Failed to export from Notion"
                     return False
 
                 # Get file size before it's potentially deleted
@@ -137,6 +137,7 @@ Created in dry-run mode at {timestamp}.
                 # Step 2: Store backup
                 storage_location = await self._handle_storage(backup_file)
                 if not storage_location:
+                    error_message = "Failed to store backup"
                     return False
 
                 # Step 2.5: Archive notification
@@ -162,14 +163,12 @@ Created in dry-run mode at {timestamp}.
         except Exception as e:
             error_message = f"Unexpected error during backup: {e}"
             logger.exception(error_message)
-            backup_success = False
+            return False
 
         finally:
             # Send failure notification if needed
-            if not backup_success and error_message:
+            if error_message:
                 await self._send_error_notification(error_message)
-
-        return backup_success
 
     async def _process_recovery_queue(self) -> None:
         """Process any pending exports from the Redis recovery queue."""
@@ -204,14 +203,15 @@ Created in dry-run mode at {timestamp}.
         task_id = export.get("task_id")
         enqueued_at = export.get("enqueued_at")
         retry_count = export.get("retry_count", 0)
+        max_retries = self.settings.max_retries
 
         if not task_id or not enqueued_at:
             logger.warning("Invalid pending export data: %s", export)
             return False
 
         # Skip exports that have exceeded retry limit
-        if retry_count >= 3:
-            logger.warning("Export task %s exceeded retry limit (%d), removing from queue", task_id, retry_count)
+        if retry_count >= max_retries:
+            logger.warning("Export task %s exceeded retry limit (%d), removing from queue", task_id, max_retries)
             return False
 
         logger.info("Processing pending export task: %s (attempt %d)", task_id, retry_count + 1)
@@ -273,9 +273,10 @@ Created in dry-run mode at {timestamp}.
             enqueued_at: When the task was enqueued
             retry_count: Current retry count
         """
+        max_retries = self.settings.max_retries
         retry_count += 1
-        if retry_count < 3:
-            logger.info("Re-queuing failed recovery for task %s (retry %d/3)", task_id, retry_count)
+        if retry_count < max_retries:
+            logger.info("Re-queuing failed recovery for task %s (retry %d/%d)", task_id, retry_count, max_retries)
             export_with_retry = {
                 "task_id": task_id,
                 "enqueued_at": enqueued_at,
@@ -283,7 +284,7 @@ Created in dry-run mode at {timestamp}.
             }
             self.redis_client.push_pending_export_with_retry(export_with_retry)
         else:
-            logger.error("Task %s failed recovery after 3 attempts, discarding", task_id)
+            logger.error("Task %s failed recovery after %d attempts, discarding", task_id, max_retries)
 
     async def _handle_export(self, temp_path: Path, dry_run: bool) -> Path | None:
         """Handle the export process and return the backup file path."""
@@ -440,15 +441,14 @@ Created in dry-run mode at {timestamp}.
         """Clean up old backups."""
         try:
             result = await self.storage.cleanup_old_backups(keep_count)
-            if result.success:
-                logger.info("Cleanup completed: %s", result.message)
-                return True
-            logger.error("Cleanup failed: %s", result.message)
-
         except Exception:
             logger.exception("Failed to cleanup backups")
             return False
         else:
+            if result.success:
+                logger.info("Cleanup completed: %s", result.message)
+                return True
+            logger.error("Cleanup failed: %s", result.message)
             return False
 
 

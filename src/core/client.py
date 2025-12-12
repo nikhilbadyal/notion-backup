@@ -230,7 +230,7 @@ class NotionClient:
             logger.warning("Error polling task status: %s", e)
         return None
 
-    async def get_notifications(self) -> dict[str, Any] | None:  # type: ignore[return]
+    async def get_notifications(self) -> dict[str, Any] | None:
         """Fetch the latest notification log from Notion."""
         notification_data = {
             "spaceId": self.settings.notion_space_id,
@@ -245,15 +245,16 @@ class NotionClient:
                 json=notification_data,
                 timeout=30,
             )
+        except Exception as e:
+            logger.warning("Exception fetching notifications: %s", e)
+            return None
+        else:
             if response.status_code == 429:
                 logger.warning("Rate limit exceeded while fetching notifications.")
                 return None
             if response.status_code == 200:
                 return response.json()  # type: ignore[no-any-return]
             logger.warning("Failed to fetch notifications (HTTP %d): %s", response.status_code, response.text)
-        except Exception as e:
-            logger.warning("Exception fetching notifications: %s", e)
-        else:
             return None
 
     def extract_download_url_from_notifications(self, notifications: dict[str, Any], enqueued_at: int) -> str | None:
