@@ -45,6 +45,11 @@ on:
         required: false
         default: '30'
         type: string
+      enable_tmate:
+        description: 'Enable tmate debugging session'
+        required: false
+        default: false
+        type: boolean
 
 env:
   PYTHONUNBUFFERED: 1
@@ -118,6 +123,13 @@ jobs:
       uses: AnimMouse/setup-rclone@v1
       with:
         rclone_config: ${{ secrets.RCLONE_CONFIG }}
+
+
+    - name: Setup tmate debugging session
+      if: github.event.inputs.enable_tmate == 'true'
+      uses: mxschmitt/action-tmate@v3
+      with:
+        limit-access-to-actor: true
 
     - name: Run Notion Backup
       id: backup
