@@ -2,11 +2,11 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class NotificationLevel(str, Enum):
+class NotificationLevel(StrEnum):
     """Notification levels."""
 
     SUCCESS = "success"

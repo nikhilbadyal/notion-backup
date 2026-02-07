@@ -1,7 +1,7 @@
 """Configuration settings for Notion Backup."""
 
 import re
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -9,21 +9,21 @@ from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-class ExportType(str, Enum):
+class ExportType(StrEnum):
     """Supported export formats."""
 
     MARKDOWN = "markdown"
     HTML = "html"
 
 
-class StorageBackend(str, Enum):
+class StorageBackend(StrEnum):
     """Supported storage backends."""
 
     LOCAL = "local"
     RCLONE = "rclone"
 
 
-class NotificationLevel(str, Enum):
+class NotificationLevel(StrEnum):
     """Notification levels."""
 
     SUCCESS = "success"
