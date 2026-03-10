@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import anyio
+
 from .base import AbstractStorage, StorageResult
 
 
@@ -100,7 +102,7 @@ class RcloneStorage(AbstractStorage):
     async def store(self, file_path: Path, destination_name: str | None = None) -> StorageResult:
         """Store a file using rclone."""
         try:
-            if not file_path.exists():
+            if not await anyio.Path(file_path).exists():
                 return StorageResult(
                     success=False,
                     message=f"Source file does not exist: {file_path}",
@@ -120,7 +122,7 @@ class RcloneStorage(AbstractStorage):
                     message=f"Failed to upload to rclone: {output}",
                 )
 
-            file_size = file_path.stat().st_size
+            file_size = (await anyio.Path(file_path).stat()).st_size
             final_location = f"{remote_dest}/{dest_name}"
             self.log("info", f"File uploaded successfully to: {final_location}")
             self.log("info", f"File size: {file_size:,} bytes")
@@ -128,7 +130,7 @@ class RcloneStorage(AbstractStorage):
             # Remove local file if configured
             if not self.keep_local:
                 try:
-                    file_path.unlink()
+                    await anyio.Path(file_path).unlink()
                     self.log("info", f"Removed local file: {file_path}")
                 except Exception as e:
                     self.log("warning", f"Failed to remove local file: {e}")

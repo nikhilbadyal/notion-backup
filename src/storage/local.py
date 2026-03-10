@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import anyio
+
 from .base import AbstractStorage, StorageResult
 
 
@@ -24,7 +26,7 @@ class LocalStorage(AbstractStorage):
     async def store(self, file_path: Path, destination_name: str | None = None) -> StorageResult:
         """Store a file locally."""
         try:
-            if not file_path.exists():
+            if not await anyio.Path(file_path).exists():
                 return StorageResult(
                     success=False,
                     message=f"Source file does not exist: {file_path}",
@@ -101,10 +103,10 @@ class LocalStorage(AbstractStorage):
 
             for backup in to_remove:
                 try:
-                    file_path = Path(backup["path"])
-                    if file_path.exists():
+                    anyio_file_path = anyio.Path(backup["path"])
+                    if await anyio_file_path.exists():
                         removed_size += backup["size"]
-                        file_path.unlink()
+                        await anyio_file_path.unlink()
                         removed_count += 1
                         self.log("info", f"Removed old backup: {backup['name']}")
                 except Exception as e:
