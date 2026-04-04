@@ -274,7 +274,8 @@ class NotionClient:
         # Find all export-completed activities after enqueued_at
         matching_activities = []
         for activity_data in notifications.get("recordMap", {}).get("activity", {}).values():
-            activity_value = activity_data.get("value", {})
+            # Activity data is nested: activity_data['value']['value']
+            activity_value = activity_data.get("value", {}).get("value", {})
             if activity_value.get("type") == "export-completed":
                 try:
                     activity_timestamp = int(activity_value.get("start_time", 0))
