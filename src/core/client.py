@@ -64,6 +64,10 @@ class NotionClient:
             Path to the downloaded file or None if failed
         """
         try:
+            # Record wall-clock time (ms) before triggering export so we can
+            # filter out stale notifications that predate this export run.
+            export_started_at_ms = int(time.time() * 1000)
+
             # Phase 1: Trigger export task
             task_id = await self._trigger_export_task()
             if not task_id:
@@ -72,15 +76,18 @@ class NotionClient:
 
             logger.debug("Export task triggered successfully with task ID: %s", task_id)
 
-            # Phase 2: Poll for task completion
-            enqueued_at = await self._poll_task_completion(task_id)
-            if not enqueued_at:
+            # Phase 2: Poll for task completion (returns True on success)
+            task_succeeded = await self._poll_task_completion(task_id)
+            if not task_succeeded:
                 logger.error("Failed to get task completion status")
                 return None
 
-            logger.info("Export task completed at timestamp: %s", enqueued_at)
+            logger.info("Export task completed successfully")
 
-            # Phase 3: Fetch notifications and extract download URL
+            # Phase 3: Fetch notifications and extract download URL.
+            # Notion no longer returns the download URL in the getTasks response.
+            # Instead we poll getNotificationLogV2 for an "export-completed"
+            # activity whose timestamp is >= our export_started_at_ms.
             max_retries = self.settings.max_retries
             base_delay = self.settings.retry_delay
             max_delay = self.settings.max_retry_delay
@@ -94,9 +101,14 @@ class NotionClient:
 
                 notifications = await self.get_notifications()
                 if notifications:
-                    msg = f"Revived {len(notifications.get('notificationIds', {}))} notifications."
+                    msg = f"Received {len(notifications.get('notificationIds', []))} notifications."
                     logger.debug(msg)
-                    download_url = self.extract_download_url_from_notifications(notifications, enqueued_at)
+                    # Pass the wall-clock start time so we only pick up
+                    # notifications created after we triggered this export.
+                    download_url = self.extract_download_url_from_notifications(
+                        notifications,
+                        started_after_ms=export_started_at_ms,
+                    )
                     if download_url:
                         logger.info("Download URL obtained")
                         break
@@ -106,7 +118,9 @@ class NotionClient:
             if not download_url:
                 logger.error("Failed to extract download URL")
                 if self.settings.redis_host:
-                    self.redis_client.push_pending_export(task_id, enqueued_at)
+                    # Store task_id for recovery; timestamp is our wall-clock
+                    # start time (best-effort, used to filter stale notifications).
+                    self.redis_client.push_pending_export(task_id, export_started_at_ms)
                 return None
             # Phase 4: Download file
             return await self._download_file(download_url, temp_dir)
@@ -169,8 +183,15 @@ class NotionClient:
 
         return None
 
-    async def _poll_task_completion(self, task_id: str) -> int | None:
-        """Poll for task completion and return the enqueuedAt timestamp."""
+    async def _poll_task_completion(self, task_id: str) -> bool:
+        """Poll for task completion.
+
+        Notion no longer returns an enqueuedAt timestamp in the getTasks
+        response (breaking API change ~Jan 2025).  We now simply wait for
+        the task state to become 'success'.
+
+        Returns True if the task succeeded, False otherwise.
+        """
         task_data = {"taskIds": [task_id]}
         max_wait_time = self.settings.max_export_wait_time
         check_interval = self.settings.export_poll_interval
@@ -178,8 +199,13 @@ class NotionClient:
 
         while elapsed_time < max_wait_time:
             result = await self._poll_once(task_data)
-            if result is not None:
-                return result
+            # True  -> task succeeded
+            # False -> task failed (non-retryable)
+            # None  -> still in progress, keep polling
+            if result is True:
+                return True
+            if result is False:
+                return False
             await asyncio.sleep(check_interval)
             elapsed_time += check_interval
             logger.info("Waiting for export task to complete... (%d seconds)", elapsed_time)
@@ -188,10 +214,16 @@ class NotionClient:
             "Export task did not complete within %d seconds (configurable via MAX_EXPORT_WAIT_TIME)",
             max_wait_time,
         )
-        return None
+        return False
 
-    async def _poll_once(self, task_data: dict[str, Any]) -> int | None:
-        """Poll Notion for task status once. Returns enqueuedAt if success/failure/invalid, None to continue polling."""
+    async def _poll_once(self, task_data: dict[str, Any]) -> bool | None:
+        """Poll Notion for task status once.
+
+        Returns:
+            True  – task completed successfully.
+            False – task failed (stop polling).
+            None  – task still in progress (continue polling).
+        """
         try:
             response = self.session.post(
                 self.GET_TASKS_ENDPOINT,
@@ -201,6 +233,7 @@ class NotionClient:
 
             if response.status_code == 429:
                 logger.warning("Rate limit exceeded during polling.")
+                # Treat rate-limit as "try again later"
                 return None
 
             if response.status_code != 200:
@@ -216,14 +249,17 @@ class NotionClient:
             task_state = task_result.get("state")
 
             if task_state == "success":
-                enqueued_at = task_result.get("equeuedAt")
-                if enqueued_at:
-                    logger.info("Task completed successfully. EnqueuedAt: %s", enqueued_at)
-                    return int(enqueued_at)
-                logger.warning("Task completed but no enqueuedAt timestamp found")
-                return None
+                # Log pages exported if the status object is present
+                pages_exported = task_result.get("status", {}).get("pagesExported")
+                if pages_exported is not None:
+                    logger.info("Task completed successfully. Pages exported: %s", pages_exported)
+                else:
+                    logger.info("Task completed successfully.")
+                return True
             if task_state == "failure":
-                logger.error("Export task failure")
+                logger.error("Export task failed.")
+                return False
+            # Any other state (e.g. "in_progress") means keep polling
             logger.info("Task state: %s. Continuing to poll...", task_state)
 
         except Exception as e:
@@ -257,13 +293,29 @@ class NotionClient:
             logger.warning("Failed to fetch notifications (HTTP %d): %s", response.status_code, response.text)
             return None
 
-    def extract_download_url_from_notifications(self, notifications: dict[str, Any], enqueued_at: int) -> str | None:
-        """
-        Extract download URL from notifications using enqueuedAt timestamp.
+    def extract_download_url_from_notifications(
+        self,
+        notifications: dict[str, Any],
+        started_after_ms: int = 0,
+    ) -> str | None:
+        """Extract the download URL from the most recent export-completed notification.
+
+        Notion no longer returns enqueuedAt or exportURL in the getTasks
+        response.  Instead the download link is delivered via an
+        "export-completed" activity in getNotificationLogV2.
+
+        We pick the most recent export-completed activity whose timestamp
+        is >= ``started_after_ms`` (wall-clock milliseconds recorded before
+        the export was triggered) to avoid picking up stale notifications
+        from previous runs.
 
         Args:
-            notifications: The notification data dictionary.
-            enqueued_at: The timestamp when the export task was enqueued.
+            notifications: The notification data dictionary from
+                getNotificationLogV2.
+            started_after_ms: Only consider activities whose timestamp is
+                at or after this value (epoch ms).  Defaults to 0 (accept
+                any activity) for backwards compatibility with the recovery
+                queue.
 
         Returns
         -------
@@ -271,37 +323,42 @@ class NotionClient:
         """
         notification_map = notifications.get("recordMap", {}).get("notification", {})
 
-        # Find all export-completed activities after enqueued_at
-        matching_activities = []
+        # Collect all export-completed activities that happened after our
+        # export was triggered.
+        matching_activities: list[tuple[int, dict[str, Any]]] = []
         for activity_data in notifications.get("recordMap", {}).get("activity", {}).values():
-            # Activity data is nested: activity_data['value']['value']
+            # Activity data is nested: activity_data -> value -> value
             activity_value = activity_data.get("value", {}).get("value", {})
-            if activity_value.get("type") == "export-completed":
-                try:
-                    activity_timestamp = int(activity_value.get("start_time", 0))
-                except (ValueError, TypeError):
-                    continue
-                time_diff = activity_timestamp - enqueued_at
-                if time_diff >= 0:
-                    matching_activities.append((time_diff, activity_value))
+            if activity_value.get("type") != "export-completed":
+                continue
+            try:
+                activity_timestamp = int(activity_value.get("start_time", 0))
+            except (ValueError, TypeError):
+                continue
+            # Only consider activities that happened after the export was
+            # triggered (with a small 5-second tolerance to account for
+            # clock skew between local machine and Notion servers).
+            if activity_timestamp >= (started_after_ms - 5000):
+                matching_activities.append((activity_timestamp, activity_value))
 
         if not matching_activities:
             logger.warning("No matching export-completed activities found")
             return None
 
-        # Choose the nearest activity
-        _, best_match_activity = sorted(matching_activities, key=lambda x: abs(x[0]))[0]
+        # Pick the most recent activity (highest timestamp)
+        _, best_match_activity = max(matching_activities, key=lambda x: x[0])
         activity_id = best_match_activity.get("id")
 
-        # Map activity to notification(s)
+        # Map activity to notification(s) so we can mark/archive it later
         matched_notification_ids = [
             notif_id
             for notif_id, notif_obj in notification_map.items()
-            if notif_obj.get("value", {}).get("activity_id") == activity_id
+            if notif_obj.get("value", {}).get("value", {}).get("activity_id") == activity_id
         ]
         msg = f"Notification IDs referencing selected activity_id {activity_id}: {matched_notification_ids}"
         logger.debug(msg)
 
+        # The download link lives inside edits[0].link
         edits = best_match_activity.get("edits", [])
         if edits and edits[0].get("link"):
             self.export_notification_id = matched_notification_ids[0] if matched_notification_ids else None

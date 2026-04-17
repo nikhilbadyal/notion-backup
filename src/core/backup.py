@@ -194,19 +194,22 @@ Created in dry-run mode at {timestamp}.
         Process a single pending export recovery.
 
         Args:
-            export: Export data containing task_id, enqueued_at, and retry_count
+            export: Export data containing task_id, enqueued_at (wall-clock
+                start time in ms), and retry_count.
 
         Returns
         -------
             True if recovery was successful, False otherwise
         """
         task_id = export.get("task_id")
-        enqueued_at = export.get("enqueued_at")
+        # enqueued_at now stores the wall-clock time (ms) when the export
+        # was triggered – used to filter stale notifications.
+        started_after_ms = export.get("enqueued_at", 0)
         retry_count = export.get("retry_count", 0)
         max_retries = self.settings.max_retries
 
-        if not task_id or not enqueued_at:
-            logger.warning("Invalid pending export data: %s", export)
+        if not task_id:
+            logger.warning("Invalid pending export data (missing task_id): %s", export)
             return False
 
         # Skip exports that have exceeded retry limit
@@ -216,20 +219,21 @@ Created in dry-run mode at {timestamp}.
 
         logger.info("Processing pending export task: %s (attempt %d)", task_id, retry_count + 1)
 
-        recovery_successful = await self._attempt_export_recovery(task_id, enqueued_at)
+        recovery_successful = await self._attempt_export_recovery(task_id, started_after_ms)
 
         if not recovery_successful:
-            await self._handle_failed_recovery(task_id, enqueued_at, retry_count)
+            await self._handle_failed_recovery(task_id, started_after_ms, retry_count)
 
         return recovery_successful
 
-    async def _attempt_export_recovery(self, task_id: str, enqueued_at: int) -> bool:
+    async def _attempt_export_recovery(self, task_id: str, started_after_ms: int) -> bool:
         """
         Attempt to recover a single export by checking notifications and downloading.
 
         Args:
             task_id: The export task ID
-            enqueued_at: When the task was enqueued
+            started_after_ms: Wall-clock time (ms) when the export was
+                triggered, used to filter stale notifications.
 
         Returns
         -------
@@ -243,9 +247,11 @@ Created in dry-run mode at {timestamp}.
                 logger.warning("No notifications found for recovered task: %s", task_id)
                 return False
 
+            # Pass started_after_ms so we only pick up notifications
+            # created after this export was triggered.
             download_url = self.notion_client.extract_download_url_from_notifications(
                 notifications,
-                enqueued_at,
+                started_after_ms=started_after_ms,
             )
 
             if not download_url:
@@ -264,13 +270,13 @@ Created in dry-run mode at {timestamp}.
             logger.info("Successfully recovered and stored backup for task: %s", task_id)
             return True
 
-    async def _handle_failed_recovery(self, task_id: str, enqueued_at: int, retry_count: int) -> None:
+    async def _handle_failed_recovery(self, task_id: str, started_after_ms: int, retry_count: int) -> None:
         """
         Handle a failed recovery attempt by re-queuing or discarding.
 
         Args:
             task_id: The export task ID
-            enqueued_at: When the task was enqueued
+            started_after_ms: Wall-clock time (ms) when the export was triggered
             retry_count: Current retry count
         """
         max_retries = self.settings.max_retries
@@ -279,7 +285,9 @@ Created in dry-run mode at {timestamp}.
             logger.info("Re-queuing failed recovery for task %s (retry %d/%d)", task_id, retry_count, max_retries)
             export_with_retry = {
                 "task_id": task_id,
-                "enqueued_at": enqueued_at,
+                # Keep the key as "enqueued_at" for backwards compatibility
+                # with existing Redis queue entries.
+                "enqueued_at": started_after_ms,
                 "retry_count": retry_count,
             }
             self.redis_client.push_pending_export_with_retry(export_with_retry)

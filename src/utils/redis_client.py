@@ -81,12 +81,14 @@ class RedisClient:
             return True
 
     def push_pending_export(self, task_id: str, enqueued_at: int) -> None:
-        """
-        Add a pending export task to the recovery queue.
+        """Add a pending export task to the recovery queue.
 
         Args:
             task_id: The ID of the export task.
-            enqueued_at: The timestamp when the task was enqueued.
+            enqueued_at: Wall-clock time (epoch ms) when the export was
+                triggered.  Used to filter stale notifications during
+                recovery.  (Historically this was a Notion-provided
+                timestamp, but Notion no longer returns it.)
         """
         export_data = {
             "task_id": task_id,
