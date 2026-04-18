@@ -74,7 +74,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
     - name: Show configuration
       run: |
@@ -87,7 +87,7 @@ jobs:
         echo "└── Runner: ${{ runner.os }}"
 
     - name: Set up Python
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
       with:
         python-version: '3.x'
         cache: 'pip'
@@ -120,14 +120,14 @@ jobs:
         echo "📁 Logs directory created"
 
     - name: Setup Rclone
-      uses: AnimMouse/setup-rclone@v1
+      uses: AnimMouse/setup-rclone@26ef2133e09fd383329a1d4c1fbe6a71db1976c9 # v1.12.0
       with:
         rclone_config: ${{ secrets.RCLONE_CONFIG }}
 
 
     - name: Setup tmate debugging session
       if: github.event.inputs.enable_tmate == 'true'
-      uses: mxschmitt/action-tmate@v3
+      uses: mxschmitt/action-tmate@c0afd6f790e3a5564914980036ebf83216678101 # v3.23
       with:
         limit-access-to-actor: true
 
@@ -165,7 +165,7 @@ jobs:
 
     - name: Upload logs
       if: always() && (github.event.inputs.upload_logs == 'true' || github.event.inputs.upload_logs == '')
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: backup-logs-${{ github.run_number }}
         path: logs/
