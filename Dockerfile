@@ -1,5 +1,5 @@
 # Stage 1: Build the application with dependencies
-FROM python:3.11-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 # Set working directory
 WORKDIR /app
