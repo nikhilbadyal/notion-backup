@@ -36,8 +36,8 @@ class LocalStorage(AbstractStorage):
             dest_name = destination_name or file_path.name
             dest_path = self.path / dest_name
 
-            # Copy file
-            shutil.copy2(file_path, dest_path)
+            # Copy file (use copyfile to avoid copymode/copystat on FUSE mounts)
+            shutil.copyfile(file_path, dest_path)
             file_size = dest_path.stat().st_size
 
             self.log("info", f"File stored locally at: {dest_path}")

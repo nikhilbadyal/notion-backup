@@ -2,8 +2,11 @@
 
 import asyncio
 import functools
+import json
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, TypeVar
 
 T = TypeVar("T")
@@ -89,3 +92,40 @@ def truncate_string(text: str, max_length: int = 100, suffix: str = "...") -> st
     if len(text) <= max_length:
         return text
     return text[: max_length - len(suffix)] + suffix
+
+
+SESSION_FILE = Path.home() / ".notion-resume.json"
+
+
+def save_session(task_id: str, started_at_ms: int) -> None:
+    """Save export session state for resumption."""
+    data = {"task_id": task_id, "export_started_at_ms": started_at_ms}
+    SESSION_FILE.write_text(json.dumps(data, indent=2))
+    logging.getLogger(__name__).info("Session saved for task %s", task_id)
+
+
+def load_session() -> dict[str, Any] | None:
+    """Load saved session state, if any."""
+    if not SESSION_FILE.exists():
+        return None
+    try:
+        data = json.loads(SESSION_FILE.read_text())
+        task_id = data.get("task_id")
+        started_at_ms = data.get("export_started_at_ms")
+        if task_id and started_at_ms:
+            return {"task_id": task_id, "export_started_at_ms": started_at_ms}
+        clear_session()
+        return None
+    except (json.JSONDecodeError, OSError):
+        clear_session()
+        return None
+
+
+def clear_session() -> None:
+    """Clear the saved session state."""
+    try:
+        if SESSION_FILE.exists():
+            SESSION_FILE.unlink()
+            logging.getLogger(__name__).info("Session cleared")
+    except OSError:
+        pass

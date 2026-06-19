@@ -11,7 +11,7 @@ from typing import Any
 import requests
 
 from src.config import Settings
-from src.utils import get_timestamp_string, retry_async
+from src.utils import get_timestamp_string, retry_async, save_session
 from src.utils.redis_client import RedisClient
 
 logger = logging.getLogger(__name__)
@@ -52,29 +52,42 @@ class NotionClient:
         logger.info("Notion client initialized")
 
     @retry_async(max_retries=3, delay=5.0)
-    async def export_workspace(self, temp_dir: Path) -> Path | None:
+    async def export_workspace(
+        self,
+        temp_dir: Path,
+        resume_task_id: str | None = None,
+        resume_started_at_ms: int | None = None,
+    ) -> Path | None:
         """
         Export the Notion workspace and return the path to the downloaded file.
 
         Args:
             temp_dir: Temporary directory for download
+            resume_task_id: If set, skip triggering a new export and resume this task
+            resume_started_at_ms: Wall-clock time (ms) the original export was started
 
         Returns
         -------
             Path to the downloaded file or None if failed
         """
         try:
-            # Record wall-clock time (ms) before triggering export so we can
-            # filter out stale notifications that predate this export run.
-            export_started_at_ms = int(time.time() * 1000)
+            if resume_task_id and resume_started_at_ms:
+                logger.info("Resuming previous export session for task %s", resume_task_id)
+                task_id = resume_task_id
+                export_started_at_ms = resume_started_at_ms
+            else:
+                # Record wall-clock time (ms) before triggering export so we can
+                # filter out stale notifications that predate this export run.
+                export_started_at_ms = int(time.time() * 1000)
 
-            # Phase 1: Trigger export task
-            task_id = await self._trigger_export_task()
-            if not task_id:
-                logger.error("Failed to trigger export task")
-                return None
+                # Phase 1: Trigger export task
+                task_id = await self._trigger_export_task()
+                if not task_id:
+                    logger.error("Failed to trigger export task")
+                    return None
 
-            logger.debug("Export task triggered successfully with task ID: %s", task_id)
+                logger.debug("Export task triggered successfully with task ID: %s", task_id)
+                save_session(task_id, export_started_at_ms)
 
             # Phase 2: Poll for task completion (returns True on success)
             task_succeeded = await self._poll_task_completion(task_id)
@@ -368,50 +381,68 @@ class NotionClient:
         return None
 
     async def _download_file(self, download_url: str, temp_dir: Path) -> Path | None:
-        """Download the export file."""
-        try:
-            headers = {"Cookie": f"{self.FILE_TOKEN}={self.settings.notion_file_token.get_secret_value()}"}
+        """Download the export file with retry for transient errors."""
+        headers = {"Cookie": f"{self.FILE_TOKEN}={self.settings.notion_file_token.get_secret_value()}"}
 
-            # Generate filename
-            timestamp = get_timestamp_string()
-            flattened_suffix = "-flattened" if self.settings.flatten_export_filetree else ""
-            filename = f"notion-export-{self.settings.export_type.value}{flattened_suffix}_{timestamp}.zip"
+        timestamp = get_timestamp_string()
+        flattened_suffix = "-flattened" if self.settings.flatten_export_filetree else ""
+        filename = f"notion-export-{self.settings.export_type.value}{flattened_suffix}_{timestamp}.zip"
 
-            file_path = temp_dir / filename
+        file_path = temp_dir / filename
 
-            logger.info("Downloading export file: %s", filename)
+        max_retries = self.settings.max_retries
+        base_delay = self.settings.retry_delay
+        max_delay = self.settings.max_retry_delay
 
-            response = self.session.get(
-                download_url,
-                stream=True,
-                headers=headers,
-                timeout=self.settings.download_timeout,
-            )
-            response.raise_for_status()
+        for attempt in range(max_retries):
+            try:
+                logger.info("Downloading export file: %s (attempt %d/%d)", filename, attempt + 1, max_retries)
 
-            # Download with progress
-            total_size = int(response.headers.get("content-length", 0))
-            downloaded = 0
+                response = self.session.get(
+                    download_url,
+                    stream=True,
+                    headers=headers,
+                    timeout=self.settings.download_timeout,
+                )
+                response.raise_for_status()
 
-            with file_path.open("wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
+                total_size = int(response.headers.get("content-length", 0))
+                downloaded = 0
 
-                        # Log progress every 10MB
-                        if downloaded % (10 * 1024 * 1024) == 0 and total_size > 0:
-                            progress = (downloaded / total_size) * 100
-                            logger.debug("Download progress: %.1f%% (%d/%d bytes)", progress, downloaded, total_size)
+                with file_path.open("wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
 
-            file_size = file_path.stat().st_size
-            logger.info("Download completed: %s (%d bytes)", filename, file_size)
+                            if downloaded % (10 * 1024 * 1024) == 0 and total_size > 0:
+                                progress = (downloaded / total_size) * 100
+                                logger.debug("Download progress: %.1f%% (%d/%d bytes)", progress, downloaded, total_size)
 
-        except Exception:
-            logger.exception("Failed to download file")
-            return None
-        else:
-            return file_path
+                file_size = file_path.stat().st_size
+                logger.info("Download completed: %s (%d bytes)", filename, file_size)
+                return file_path
+
+            except requests.HTTPError as e:
+                if attempt < max_retries - 1 and e.response is not None and e.response.status_code >= 500:
+                    delay = min(base_delay * (2 ** attempt), max_delay)
+                    logger.warning(
+                        "Download failed with HTTP %d (attempt %d/%d), retrying in %ds",
+                        e.response.status_code,
+                        attempt + 1,
+                        max_retries,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.exception("Failed to download file")
+                    return None
+
+            except Exception:
+                logger.exception("Failed to download file")
+                return None
+
+        return None
 
     async def _update_notification(self, args: dict[str, Any], debug_action: str) -> bool:
         if not self.export_notification_id:

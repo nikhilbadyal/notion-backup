@@ -70,8 +70,10 @@ def cli(ctx: click.Context, debug: bool, dry_run: bool) -> None:
 
 
 @cli.command()
+@click.option("--resume", is_flag=True, help="Resume previous backup session without prompting")
+@click.option("--skip-resume", is_flag=True, help="Skip resume and start a fresh backup")
 @click.pass_context
-def backup(ctx: click.Context) -> None:
+def backup(ctx: click.Context, resume: bool, skip_resume: bool) -> None:
     """Run backup of Notion workspace."""
     settings = load_settings()
     dry_run = ctx.obj.get("dry_run", False)
@@ -86,7 +88,12 @@ def backup(ctx: click.Context) -> None:
     click.echo(f"📄 Export Type: {settings.export_type.value}")
     click.echo()
 
-    success = run_backup_sync(settings, dry_run=dry_run)
+    if resume and skip_resume:
+        click.echo("❌ Cannot use both --resume and --skip-resume.", err=True)
+        sys.exit(1)
+
+    resume_opt: bool | None = True if resume else (False if skip_resume else None)
+    success = run_backup_sync(settings, dry_run=dry_run, resume=resume_opt)
 
     if success:
         click.echo("✅ Backup completed successfully!")

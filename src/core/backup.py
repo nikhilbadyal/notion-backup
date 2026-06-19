@@ -10,7 +10,7 @@ from typing import Any
 from src.config import Settings
 from src.notifiers import AbstractNotifier, AppriseNotifier
 from src.storage import AbstractStorage, LocalStorage, RcloneStorage
-from src.utils import format_file_size, get_timestamp_string
+from src.utils import clear_session, format_file_size, get_timestamp_string, load_session
 from src.utils.redis_client import RedisClient
 
 from .client import NotionClient
@@ -96,20 +96,50 @@ Created in dry-run mode at {timestamp}.
         notification_config = self.settings.get_notification_config()
         return AppriseNotifier(notification_config, logger)
 
-    async def run_backup(self, dry_run: bool = False) -> bool:
+    async def run_backup(
+        self,
+        dry_run: bool = False,
+        resume: bool | None = None,
+    ) -> bool:
         """
         Run the complete backup process.
+
+        Args:
+            dry_run: If True, skip Notion export and use a dummy file
+            resume: None=prompt if session exists, True=auto-resume, False=skip resume
 
         Returns
         -------
             True if backup was successful, False otherwise
         """
         error_message = None
+        resume_task_id: str | None = None
+        resume_started_at_ms: int | None = None
 
         try:
             logger.info("=" * 60)
             logger.info("Starting Notion Backup Process")
             logger.info("=" * 60)
+
+            # Check for resumable session
+            session = load_session()
+            if session:
+                if resume is None:
+                    answer = await asyncio.to_thread(
+                        input,
+                        "A previous backup session was found. Resume it? [y/N]: ",
+                    )
+                    should_resume = answer.strip().lower() == "y"
+                else:
+                    should_resume = resume
+
+                if should_resume:
+                    logger.info("Resuming previous backup session for task %s", session["task_id"])
+                    resume_task_id = session["task_id"]
+                    resume_started_at_ms = session["export_started_at_ms"]
+                else:
+                    logger.info("Starting fresh backup session")
+                    clear_session()
 
             # Test connections first
             await self._test_connections(dry_run=dry_run)
@@ -123,8 +153,14 @@ Created in dry-run mode at {timestamp}.
                 temp_path = Path(temp_dir)
 
                 # Step 1: Export from Notion
-                backup_file = await self._handle_export(temp_path, dry_run)
+                backup_file = await self._handle_export(
+                    temp_path,
+                    dry_run,
+                    resume_task_id=resume_task_id,
+                    resume_started_at_ms=resume_started_at_ms,
+                )
                 if not backup_file:
+                    clear_session()
                     error_message = "Failed to export from Notion"
                     return False
 
@@ -145,6 +181,9 @@ Created in dry-run mode at {timestamp}.
 
                 # Step 3: Cleanup old backups
                 await self._handle_cleanup()
+
+                # Clear session on success
+                clear_session()
 
                 # Send success notification
                 await self._send_success_notification(
@@ -294,7 +333,13 @@ Created in dry-run mode at {timestamp}.
         else:
             logger.error("Task %s failed recovery after %d attempts, discarding", task_id, max_retries)
 
-    async def _handle_export(self, temp_path: Path, dry_run: bool) -> Path | None:
+    async def _handle_export(
+        self,
+        temp_path: Path,
+        dry_run: bool,
+        resume_task_id: str | None = None,
+        resume_started_at_ms: int | None = None,
+    ) -> Path | None:
         """Handle the export process and return the backup file path."""
         backup_file: Path | None = None
 
@@ -303,7 +348,11 @@ Created in dry-run mode at {timestamp}.
             backup_file = self._create_dummy_export(temp_path)
         else:
             logger.info("Step 1: Exporting from Notion...")
-            backup_file = await self.notion_client.export_workspace(temp_path)
+            backup_file = await self.notion_client.export_workspace(
+                temp_path,
+                resume_task_id=resume_task_id,
+                resume_started_at_ms=resume_started_at_ms,
+            )
 
             if not backup_file:
                 logger.error("Failed to export from Notion")
@@ -461,11 +510,15 @@ Created in dry-run mode at {timestamp}.
 
 
 # Synchronous wrapper for async operations
-def run_backup_sync(settings: Settings, dry_run: bool = False) -> bool:
+def run_backup_sync(
+    settings: Settings,
+    dry_run: bool = False,
+    resume: bool | None = None,
+) -> bool:
     """Run backup synchronously (wrapper for async operation)."""
     try:
         manager = BackupManager(settings)
-        return asyncio.run(manager.run_backup(dry_run=dry_run))
+        return asyncio.run(manager.run_backup(dry_run=dry_run, resume=resume))
     except Exception:
         logger.exception("Failed to run backup")
         return False
