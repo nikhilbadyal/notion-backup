@@ -100,7 +100,11 @@ SESSION_FILE = Path.home() / ".notion-resume.json"
 def save_session(task_id: str, started_at_ms: int) -> None:
     """Save export session state for resumption."""
     data = {"task_id": task_id, "export_started_at_ms": started_at_ms}
-    SESSION_FILE.write_text(json.dumps(data, indent=2))
+    try:
+        SESSION_FILE.write_text(json.dumps(data, indent=2))
+    except OSError as e:
+        logging.getLogger(__name__).warning("Failed to persist resume session: %s", e)
+        return
     logging.getLogger(__name__).info("Session saved for task %s", task_id)
 
 

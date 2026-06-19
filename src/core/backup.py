@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -125,11 +126,15 @@ Created in dry-run mode at {timestamp}.
             session = load_session()
             if session:
                 if resume is None:
-                    answer = await asyncio.to_thread(
-                        input,
-                        "A previous backup session was found. Resume it? [y/N]: ",
-                    )
-                    should_resume = answer.strip().lower() == "y"
+                    if not sys.stdin.isatty():
+                        logger.info("Non-interactive environment detected; starting fresh backup session")
+                        should_resume = False
+                    else:
+                        answer = await asyncio.to_thread(
+                            input,
+                            "A previous backup session was found. Resume it? [y/N]: ",
+                        )
+                        should_resume = answer.strip().lower() == "y"
                 else:
                     should_resume = resume
 
@@ -160,7 +165,8 @@ Created in dry-run mode at {timestamp}.
                     resume_started_at_ms=resume_started_at_ms,
                 )
                 if not backup_file:
-                    clear_session()
+                    if resume_task_id is not None:
+                        clear_session()
                     error_message = "Failed to export from Notion"
                     return False
 
