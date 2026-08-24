@@ -5,6 +5,7 @@ import logging
 import sys
 import tempfile
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -14,9 +15,20 @@ from src.storage import AbstractStorage, LocalStorage, RcloneStorage
 from src.utils import clear_session, format_file_size, get_timestamp_string, load_session
 from src.utils.redis_client import RedisClient
 
-from .client import NotionClient
+from .client import ExportFailure, ExportResult, NotionClient
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RecoveryResult:
+    """Result of a single recovery attempt from the Redis recovery queue."""
+
+    success: bool
+    task_id: str | None = None
+    backup_filename: str | None = None
+    file_size: int = 0
+    storage_location: str | None = None
 
 
 class BackupManager:
@@ -114,8 +126,6 @@ Created in dry-run mode at {timestamp}.
             True if backup was successful, False otherwise
         """
         error_message = None
-        resume_task_id: str | None = None
-        resume_started_at_ms: int | None = None
 
         try:
             logger.info("=" * 60)
@@ -123,52 +133,49 @@ Created in dry-run mode at {timestamp}.
             logger.info("=" * 60)
 
             # Check for resumable session
-            session = load_session(self.settings.notion_space_id)
-            if session:
-                if resume is None:
-                    if not sys.stdin.isatty():
-                        logger.info("Non-interactive environment detected; starting fresh backup session")
-                        should_resume = False
-                    else:
-                        answer = await asyncio.to_thread(
-                            input,
-                            "A previous backup session was found. Resume it? [y/N]: ",
-                        )
-                        should_resume = answer.strip().lower() == "y"
-                else:
-                    should_resume = resume
-
-                if should_resume:
-                    logger.info("Resuming previous backup session for task %s", session["task_id"])
-                    resume_task_id = session["task_id"]
-                    resume_started_at_ms = session["export_started_at_ms"]
-                else:
-                    logger.info("Starting fresh backup session")
-                    clear_session(self.settings.notion_space_id)
+            resume_task_id, resume_started_at_ms = await self._load_resume_session(resume)
 
             # Test connections first
             await self._test_connections(dry_run=dry_run)
 
             # Process recovery queue
+            recovered_exports: list[RecoveryResult] = []
             if self.settings.redis_host:
-                await self._process_recovery_queue()
+                recovered_exports = await self._process_recovery_queue()
+
+            # If the task we were about to resume was already recovered from
+            # the queue, skip the main export to avoid re-downloading and
+            # re-storing the same file.
+            if await self._handle_recovered_resumed_task(recovered_exports, resume_task_id, dry_run):
+                return True
 
             # Create temporary directory for download
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_path = Path(temp_dir)
 
                 # Step 1: Export from Notion
-                backup_file = await self._handle_export(
+                export_result = await self._handle_export(
                     temp_path,
                     dry_run,
                     resume_task_id=resume_task_id,
                     resume_started_at_ms=resume_started_at_ms,
                 )
-                if not backup_file:
-                    if resume_task_id is not None:
+                if export_result.file is None:
+                    if export_result.failure == ExportFailure.TASK_FAILED:
+                        # Task is dead; a fresh export is required next run.
                         clear_session(self.settings.notion_space_id)
+                    else:
+                        # Transient failure (e.g. download URL not ready yet).
+                        # Keep the session so the next run can resume this task.
+                        logger.info(
+                            "Export failed transiently (%s); session preserved for task %s",
+                            export_result.failure,
+                            resume_task_id or "new task",
+                        )
                     error_message = "Failed to export from Notion"
                     return False
+
+                backup_file = export_result.file
 
                 # Get file size before it's potentially deleted
                 file_size = backup_file.stat().st_size
@@ -215,26 +222,103 @@ Created in dry-run mode at {timestamp}.
             if error_message:
                 await self._send_error_notification(error_message)
 
-    async def _process_recovery_queue(self) -> None:
-        """Process any pending exports from the Redis recovery queue."""
+    async def _load_resume_session(self, resume: bool | None) -> tuple[str | None, int | None]:
+        """Load a resumable session, prompting the user if needed.
+
+        Args:
+            resume: None=prompt if session exists, True=auto-resume, False=skip resume
+
+        Returns
+        -------
+            (task_id, started_at_ms) if resuming, else (None, None).
+        """
+        session = load_session(self.settings.notion_space_id)
+        if not session:
+            return None, None
+
+        if resume is None:
+            if not sys.stdin.isatty():
+                logger.info("Non-interactive environment detected; starting fresh backup session")
+                should_resume = False
+            else:
+                answer = await asyncio.to_thread(
+                    input,
+                    "A previous backup session was found. Resume it? [y/N]: ",
+                )
+                should_resume = answer.strip().lower() == "y"
+        else:
+            should_resume = resume
+
+        if should_resume:
+            logger.info("Resuming previous backup session for task %s", session["task_id"])
+            return session["task_id"], session["export_started_at_ms"]
+
+        logger.info("Starting fresh backup session")
+        clear_session(self.settings.notion_space_id)
+        return None, None
+
+    async def _handle_recovered_resumed_task(
+        self,
+        recovered_exports: list[RecoveryResult],
+        resume_task_id: str | None,
+        dry_run: bool,
+    ) -> bool:
+        """Finish successfully if the resumed task was recovered from the queue.
+
+        Args:
+            recovered_exports: Successful recovery results from this run
+            resume_task_id: The task we were about to resume, if any
+            dry_run: Whether this is a dry run
+
+        Returns
+        -------
+            True if the backup was completed via recovery (caller should skip
+            the main export), False otherwise.
+        """
+        recovered = next((r for r in recovered_exports if r.task_id == resume_task_id), None)
+        if recovered is None:
+            return False
+
+        clear_session(self.settings.notion_space_id)
+        await self._send_success_notification(
+            recovered.backup_filename or "unknown",
+            recovered.file_size,
+            recovered.storage_location or "Unknown location",
+            dry_run=dry_run,
+        )
+        logger.info("=" * 60)
+        logger.info("Backup Process Completed Successfully (recovered from queue)")
+        logger.info("=" * 60)
+        return True
+
+    async def _process_recovery_queue(self) -> list[RecoveryResult]:
+        """Process any pending exports from the Redis recovery queue.
+
+        Returns
+        -------
+            List of successful recovery results.
+        """
         logger.info("Checking for pending exports in recovery queue...")
         pending_exports = self.redis_client.get_pending_exports()
 
         if not pending_exports:
             logger.info("No pending exports found.")
-            return
+            return []
 
         logger.info("Found %d pending exports. Processing...", len(pending_exports))
-        successful_recoveries = 0
+        recovered_exports: list[RecoveryResult] = []
 
         for export in pending_exports:
-            if await self._process_single_recovery(export):
-                successful_recoveries += 1
+            result = await self._process_single_recovery(export)
+            if result.success:
+                recovered_exports.append(result)
 
-        if successful_recoveries > 0:
-            logger.info("Successfully recovered %d pending exports", successful_recoveries)
+        if recovered_exports:
+            logger.info("Successfully recovered %d pending exports", len(recovered_exports))
 
-    async def _process_single_recovery(self, export: dict[str, Any]) -> bool:
+        return recovered_exports
+
+    async def _process_single_recovery(self, export: dict[str, Any]) -> RecoveryResult:
         """
         Process a single pending export recovery.
 
@@ -244,7 +328,7 @@ Created in dry-run mode at {timestamp}.
 
         Returns
         -------
-            True if recovery was successful, False otherwise
+            RecoveryResult indicating whether recovery was successful.
         """
         task_id = export.get("task_id")
         # enqueued_at now stores the wall-clock time (ms) when the export
@@ -255,23 +339,23 @@ Created in dry-run mode at {timestamp}.
 
         if not task_id:
             logger.warning("Invalid pending export data (missing task_id): %s", export)
-            return False
+            return RecoveryResult(success=False)
 
         # Skip exports that have exceeded retry limit
         if retry_count >= max_retries:
             logger.warning("Export task %s exceeded retry limit (%d), removing from queue", task_id, max_retries)
-            return False
+            return RecoveryResult(success=False)
 
         logger.info("Processing pending export task: %s (attempt %d)", task_id, retry_count + 1)
 
-        recovery_successful = await self._attempt_export_recovery(task_id, started_after_ms)
+        recovery_result = await self._attempt_export_recovery(task_id, started_after_ms)
 
-        if not recovery_successful:
+        if not recovery_result.success:
             await self._handle_failed_recovery(task_id, started_after_ms, retry_count)
 
-        return recovery_successful
+        return recovery_result
 
-    async def _attempt_export_recovery(self, task_id: str, started_after_ms: int) -> bool:
+    async def _attempt_export_recovery(self, task_id: str, started_after_ms: int) -> RecoveryResult:
         """
         Attempt to recover a single export by checking notifications and downloading.
 
@@ -282,7 +366,7 @@ Created in dry-run mode at {timestamp}.
 
         Returns
         -------
-            True if recovery was successful, False otherwise
+            RecoveryResult with the stored backup details on success.
         """
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -290,7 +374,7 @@ Created in dry-run mode at {timestamp}.
 
             if not notifications:
                 logger.warning("No notifications found for recovered task: %s", task_id)
-                return False
+                return RecoveryResult(success=False)
 
             # Pass started_after_ms so we only pick up notifications
             # created after this export was triggered.
@@ -301,19 +385,30 @@ Created in dry-run mode at {timestamp}.
 
             if not download_url:
                 logger.warning("Could not find download URL for recovered task: %s", task_id)
-                return False
+                return RecoveryResult(success=False)
 
             backup_file = await self.notion_client._download_file(download_url, temp_path)  # noqa: SLF001
 
             if not backup_file:
                 logger.error("Failed to download recovered backup for task: %s", task_id)
-                return False
+                return RecoveryResult(success=False)
 
-            await self._handle_storage(backup_file)
+            file_size = backup_file.stat().st_size
+            storage_location = await self._handle_storage(backup_file)
+            if not storage_location:
+                logger.error("Failed to store recovered backup for task: %s", task_id)
+                return RecoveryResult(success=False)
+
             await self._handle_notification_marking(dry_run=False)
             await self._handle_notification_archiving(dry_run=False)
             logger.info("Successfully recovered and stored backup for task: %s", task_id)
-            return True
+            return RecoveryResult(
+                success=True,
+                task_id=task_id,
+                backup_filename=backup_file.name,
+                file_size=file_size,
+                storage_location=storage_location,
+            )
 
     async def _handle_failed_recovery(self, task_id: str, started_after_ms: int, retry_count: int) -> None:
         """
@@ -345,33 +440,28 @@ Created in dry-run mode at {timestamp}.
         dry_run: bool,
         resume_task_id: str | None = None,
         resume_started_at_ms: int | None = None,
-    ) -> Path | None:
+    ) -> ExportResult:
         """Handle the export process and return the backup file path."""
-        backup_file: Path | None = None
-
         if dry_run:
             logger.info("Step 1: Creating dummy export file (DRY RUN MODE)...")
             backup_file = self._create_dummy_export(temp_path)
         else:
             logger.info("Step 1: Exporting from Notion...")
-            backup_file = await self.notion_client.export_workspace(
+            export_result = await self.notion_client.export_workspace(
                 temp_path,
                 resume_task_id=resume_task_id,
                 resume_started_at_ms=resume_started_at_ms,
             )
 
-            if not backup_file:
-                logger.error("Failed to export from Notion")
-                return None
+            if export_result.file is None:
+                logger.error("Failed to export from Notion: %s", export_result.failure)
+                return export_result
 
-        # At this point backup_file is guaranteed to be Path, not None
-        if backup_file is None:
-            logger.error("Unexpected: backup_file is None after successful export")
-            return None
+            backup_file = export_result.file
 
         file_size = backup_file.stat().st_size
         logger.info("Export completed: %s (%s)", backup_file.name, format_file_size(file_size))
-        return backup_file
+        return ExportResult(file=backup_file)
 
     async def _handle_notification_marking(self, dry_run: bool) -> None:
         """Handle marking export notifications as read."""
@@ -428,6 +518,17 @@ Created in dry-run mode at {timestamp}.
             logger.info("Testing connections (DRY RUN MODE - skipping Notion API)...")
         else:
             logger.info("Testing connections...")
+
+        # Verify Notion credentials first so we fail fast before any
+        # export/recovery work begins.
+        if not dry_run:
+            notion_test = await self.notion_client.test_connection()
+            if notion_test.success:
+                logger.info("✓ Notion credentials: %s", notion_test.message)
+            else:
+                logger.error("✗ Notion credentials failed: %s", notion_test.message)
+                msg = f"Notion credentials failed: {notion_test.message}"
+                raise ConnectionError(msg)
 
         # Test storage connection
         storage_test = await self.storage.test_connection()

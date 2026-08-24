@@ -109,10 +109,28 @@ class RedisClient:
             return
 
         try:
-            payload = json.dumps(export_data)
-            self.client.rpush(self.RECOVERY_QUEUE_KEY, payload)
             task_id = export_data.get("task_id", "unknown")
             retry_count = export_data.get("retry_count", 0)
+
+            # Avoid duplicate queue entries for the same task: if the task is
+            # already queued, keep the existing entry (which has the higher
+            # retry_count) and skip the push.
+            existing_items = self.client.lrange(self.RECOVERY_QUEUE_KEY, 0, -1)
+            for item in existing_items:
+                try:
+                    existing = json.loads(item)
+                except json.JSONDecodeError:
+                    continue
+                if existing.get("task_id") == task_id:
+                    logger.info(
+                        "Task %s already in recovery queue (retry %d), skipping duplicate push",
+                        task_id,
+                        existing.get("retry_count", 0),
+                    )
+                    return
+
+            payload = json.dumps(export_data)
+            self.client.rpush(self.RECOVERY_QUEUE_KEY, payload)
             logger.info("Pushed pending export task to Redis recovery queue: %s (retry %d)", task_id, retry_count)
         except Exception:
             logger.exception("Failed to push pending export to Redis")

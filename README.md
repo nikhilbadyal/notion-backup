@@ -60,9 +60,9 @@ cp .env.example .env
 ### 3. Get Notion Credentials
 
 1. Login to [Notion](https://www.notion.so/login)
-2. Open browser developer console → Network tab
-3. Use "Quick Find" and search for something
-4. Find the `search` request and copy:
+2. Open the browser developer console (`F12` → Console)
+3. Paste the snippet from [docs/get-credentials-console-snippet.md](docs/get-credentials-console-snippet.md) and press Enter
+4. Copy the printed values into your `.env` file:
    - `spaceId` → `NOTION_SPACE_ID`
    - `token_v2` cookie → `NOTION_TOKEN_V2`
    - `file_token` cookie → `NOTION_FILE_TOKEN`
@@ -98,6 +98,21 @@ python main.py list
 # Cleanup old backups (keep 5 most recent)
 python main.py cleanup --keep 5
 ```
+
+### 6. Verify Credentials
+
+Before running a backup, the tool verifies your Notion credentials (token, file token, and space ID) via a lightweight API call — no export is triggered. This check runs automatically as part of the backup pre-flight, so invalid credentials fail fast before any export or recovery work begins.
+
+You can also run the check on its own:
+
+```bash
+# Verify Notion credentials without triggering an export
+python main.py test
+```
+
+If the credentials are invalid, the command exits with a non-zero status and a clear error message.
+
+The `file_token` cookie (used for downloads) is also checked with a best-effort probe: if it appears expired, you'll see a warning suggesting you refresh `NOTION_FILE_TOKEN` from your browser. If downloads fail with HTTP 403, the `file_token` has likely expired — refresh it (Notion → DevTools → Network → any request → Cookies → `file_token`) and re-run; the backup session is preserved, so it will resume automatically. The tool sends both `token_v2` and `file_token` cookies on downloads (browser parity) and, if a 403 still occurs, retries once without cookies in case the signed URL is self-sufficient. If the 403 persists after refreshing the token, the old export link may be bound to a previous account/session — start a fresh export with `python main.py backup --skip-resume`.
 
 ## 🐳 Docker
 
@@ -231,8 +246,8 @@ APPRISE_URLS=discord://webhook_id/webhook_token,mailto://user:pass@smtp.gmail.co
 | `MAX_RETRIES`                | `3`     | Max retry attempts                               |
 | `RETRY_DELAY`                | `5`     | Delay between retries (seconds)                  |
 | `DOWNLOAD_TIMEOUT`           | `300`   | Download timeout (seconds)                       |
-| `MAX_EXPORT_WAIT_TIME`       | `3600`  | Max time to wait for export completion (seconds) |
-| `EXPORT_POLL_INTERVAL`       | `10`    | Interval between export checks (seconds)         |
+| `MAX_EXPORT_WAIT_TIME`       | `3600`  | Max time to wait for the export to be ready (seconds). Bounds both task completion and download-URL availability — raise this for large workspaces that take longer to finalize |
+| `EXPORT_POLL_INTERVAL`       | `15`    | Interval between export readiness checks (seconds) |
 | `MAX_RETRY_DELAY`            | `300`   | Maximum delay between retries (seconds)          |
 | `MARK_NOTIFICATIONS_AS_READ` | `true`  | Mark export notifications as read after download |
 | `ARCHIVE_NOTIFICATION`       | `false` | Archive export notification after upload         |
@@ -388,6 +403,18 @@ Start in: /path/to/notion-backup
 - Check network connectivity
 - Verify space ID is correct
 
+#### "Failed to extract download URL" / "url_not_ready" on large workspaces
+
+For large workspaces, Notion can report the export task as complete in
+`getTasks` while the `export-completed` notification (which carries the
+download link) is still being prepared. The tool now keeps polling for the
+download URL for up to `MAX_EXPORT_WAIT_TIME` seconds (default 1 hour) within
+the same run, so it should complete on its own. If you still see
+`url_not_ready`, the export is taking longer than that window — raise
+`MAX_EXPORT_WAIT_TIME` (and optionally lower `EXPORT_POLL_INTERVAL` for more
+frequent checks). The backup session is preserved, so a subsequent run will
+resume the same export rather than starting over.
+
 #### "Notification failed"
 
 - Test notification URLs independently
@@ -400,6 +427,14 @@ Enable debug logging for detailed troubleshooting:
 ```bash
 python main.py --debug backup
 ```
+
+Debug output includes:
+
+- Environment info (Python version, platform, `requests` version)
+- The exact export request payload sent to Notion
+- Full response details for every Notion API call: status code, URL, and body
+- Rate-limit headers (`Retry-After`, `X-RateLimit-*`) when Notion throttles the
+  request — use these to confirm a genuine HTTP 429 rate limit vs. a coding issue
 
 ### Testing Configuration
 

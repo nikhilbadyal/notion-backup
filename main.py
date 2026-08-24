@@ -4,6 +4,7 @@ Notion Backup - Modular Version
 Automatically backup your Notion workspace with pluggable storage and notification backends.
 """
 
+import asyncio
 import logging
 import sys
 
@@ -11,7 +12,10 @@ import click
 from pydantic import ValidationError
 
 from src.config import Settings
+
+logger = logging.getLogger(__name__)
 from src.core import cleanup_backups_sync, list_backups_sync, run_backup_sync
+from src.core.client import NotionClient
 from src.utils import format_file_size
 
 
@@ -58,6 +62,17 @@ def cli(ctx: click.Context, debug: bool, dry_run: bool) -> None:
     """Notion Backup - Modular backup tool for Notion workspaces."""
     # Set up logging
     setup_logging(debug)
+
+    if debug:
+        logger.debug("Debug mode enabled")
+        logger.debug("Python: %s", sys.version.replace("\n", " "))
+        logger.debug("Platform: %s", sys.platform)
+        try:
+            import requests
+
+            logger.debug("requests version: %s", requests.__version__)
+        except ImportError:
+            pass
 
     # Store flags in context for commands to access
     ctx.ensure_object(dict)
@@ -165,8 +180,16 @@ def test(_: click.Context) -> None:
     click.echo("🔧 Testing configuration...")
     click.echo(f"📦 Storage Backend: {settings.storage_backend.value}")
 
-    # Test would be implemented here
-    click.echo("✅ Configuration test passed!")
+    # Verify Notion credentials without triggering an export
+    click.echo("🔑 Verifying Notion credentials...")
+    client = NotionClient(settings)
+    result = asyncio.run(client.test_connection())
+
+    if result.success:
+        click.echo(f"✅ {result.message}")
+    else:
+        click.echo(f"❌ {result.message}", err=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
