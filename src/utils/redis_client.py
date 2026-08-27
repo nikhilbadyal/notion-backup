@@ -5,6 +5,8 @@ import logging
 from typing import Any
 
 import redis
+from redis.backoff import ExponentialBackoff
+from redis.retry import Retry
 
 from src.config import Settings
 
@@ -53,6 +55,10 @@ class RedisClient:
                 decode_responses=True,
                 socket_connect_timeout=5,
                 socket_timeout=5,
+                # Use redis-py's explicit retry policy so transient timeouts
+                # remain recoverable without the deprecated retry_on_timeout flag.
+                retry=Retry(ExponentialBackoff(), 3),
+                retry_on_error=[redis.exceptions.TimeoutError],
                 **ssl_params,
             )
             client.ping()
