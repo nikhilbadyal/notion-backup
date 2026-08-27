@@ -123,6 +123,19 @@ class TestNotionConnection:
         assert result.success is False
         assert "500" in result.message
 
+    def test_rate_limit_is_inconclusive_and_non_fatal(self) -> None:
+        """A 429 must not be misclassified as invalid credentials."""
+        client, session = make_client_with_mock_session()
+        response = MagicMock()
+        response.status_code = 429
+        session.post.return_value = response
+
+        result = asyncio.run(client.test_connection())
+
+        assert result.success is True
+        assert result.warning is True
+        assert "429" in result.message
+
     def test_network_exception(self) -> None:
         """A network exception should fail gracefully without raising."""
         client, session = make_client_with_mock_session()
@@ -147,7 +160,11 @@ class TestPreflightWiring:
         manager = BackupManager(make_settings())
         manager.notion_client = MagicMock()
         manager.notion_client.test_connection = AsyncMock(
-            return_value=MagicMock(success=False, message="Notion token invalid or expired (HTTP 401)"),
+            return_value=MagicMock(
+                success=False,
+                warning=False,
+                message="Notion token invalid or expired (HTTP 401)",
+            ),
         )
         manager.storage = MagicMock()
         manager.storage.test_connection = AsyncMock()
@@ -163,7 +180,7 @@ class TestPreflightWiring:
         manager = BackupManager(make_settings())
         manager.notion_client = MagicMock()
         manager.notion_client.test_connection = AsyncMock(
-            return_value=MagicMock(success=True, message="Notion credentials valid"),
+            return_value=MagicMock(success=True, warning=False, message="Notion credentials valid"),
         )
         manager.storage = MagicMock()
         manager.storage.test_connection = AsyncMock(

@@ -84,7 +84,11 @@ class Settings(BaseSettings):
         default=3600,
         description="Maximum time to wait for export completion in seconds (default: 1 hour)",
     )
-    export_poll_interval: int = Field(default=15, description="Interval between export completion checks in seconds")
+    export_poll_interval: int = Field(
+        default=15,
+        gt=0,
+        description="Interval between export completion checks in seconds",
+    )
     max_retry_delay: int = Field(
         default=300,
         description="Maximum delay between retries in seconds (default: 5 minutes)",

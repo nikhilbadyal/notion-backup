@@ -14,7 +14,12 @@ The fastest way to obtain the three credentials this tool needs (`spaceId`, `tok
 ```javascript
 (async () => {
   try {
-    if (!location.hostname.endsWith('notion.so') && !location.hostname.endsWith('notion.com')) {
+    // Require an exact Notion registrable domain boundary so lookalikes such
+    // as evilnotion.com cannot pass this credential-handling guard.
+    const isNotionHost = (host) => ['notion.so', 'notion.com'].some(
+      (domain) => host === domain || host.endsWith('.' + domain),
+    );
+    if (!isNotionHost(location.hostname)) {
       console.error('❌ This snippet must run on a Notion page (notion.so or notion.com). You are on: ' + location.hostname);
       return;
     }
@@ -96,8 +101,10 @@ The fastest way to obtain the three credentials this tool needs (`spaceId`, `tok
       console.warn('Readable cookies: ' + (names.length ? names.join(', ') : '(none)'));
       console.warn('Copy the token_v2 and file_token values from DevTools → Application → Cookies → ' + location.hostname);
       console.warn('Then replace the PASTE_... placeholders in the .env block below.');
-      tokenV2 = 'PASTE_TOKEN_V2_HERE';
-      fileToken = 'PASTE_FILE_TOKEN_HERE';
+      // Preserve any independently readable cookie and add a placeholder only
+      // for the HttpOnly value that the browser withheld.
+      tokenV2 = tokenV2 || 'PASTE_TOKEN_V2_HERE';
+      fileToken = fileToken || 'PASTE_FILE_TOKEN_HERE';
     }
 
     const envBlock = [
@@ -118,9 +125,15 @@ The fastest way to obtain the three credentials this tool needs (`spaceId`, `tok
       ta.value = envBlock;
       document.body.appendChild(ta);
       ta.select();
-      document.execCommand('copy');
+      // execCommand reports whether the legacy clipboard operation succeeded;
+      // do not claim success when manual copying is still required.
+      const copied = document.execCommand('copy');
       document.body.removeChild(ta);
-      console.log('\n✅ Copied to clipboard (fallback).');
+      if (copied) {
+        console.log('\n✅ Copied to clipboard (fallback).');
+      } else {
+        console.error('\n❌ Clipboard copy failed. Copy the .env block printed above manually.');
+      }
     }
   } catch (err) {
     console.error('❌ Unexpected error:', err);

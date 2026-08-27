@@ -1,7 +1,6 @@
 """Notion API client for exporting workspaces."""
 
 import asyncio
-import json
 import logging
 import time
 import uuid
@@ -9,6 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -25,12 +25,22 @@ class ConnectionResult:
 
     success: bool
     message: str
+    warning: bool = False
+
+
+class TaskPollResult(StrEnum):
+    """Outcome of polling an export task, preserving whether failure is permanent."""
+
+    SUCCESS = "success"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
 
 
 class ExportFailure(StrEnum):
     """Reason an export failed, used to decide whether a session can be resumed."""
 
     TASK_FAILED = "task_failed"  # Permanent: Notion reported the task failed
+    TASK_NOT_READY = "task_not_ready"  # Transient: polling ended before Notion completed the task
     TRIGGER_FAILED = "trigger_failed"  # Transient: could not enqueue the export task
     URL_NOT_READY = "url_not_ready"  # Transient: task succeeded but download URL not available yet
     DOWNLOAD_FAILED = "download_failed"  # Transient: download failed after retries
@@ -59,38 +69,36 @@ class NotionClient:
 
     TOKEN_V2 = "token_v2"  # noqa: S105
     FILE_TOKEN = "file_token"  # noqa: S105
+    NOTION_COOKIE_DOMAINS = (".notion.so", ".notion.com")
 
     def __init__(self, settings: Settings) -> None:
         """Initialize the Notion client."""
         self.settings = settings
         self.session = requests.Session()
+        self.public_session = requests.Session()
         self.export_notification_id: str | None = None  # Track notification ID for marking as read
         self.redis_client = RedisClient(settings)
 
-        # Set up session with default headers. The Cookie header carries BOTH
-        # token_v2 and file_token (browser parity): www.notion.so API calls
-        # need token_v2, and file.notion.com downloads need file_token.
-        # Note: requests drops a per-request cookies= param when a Cookie
-        # header is already set on the session, so both cookies must live here.
+        # Keep authentication in a cookie jar so Requests enforces domain and
+        # HTTPS boundaries even when Notion returns a cross-host download URL.
         token_v2 = self.settings.notion_token_v2.get_secret_value()
         file_token = self.settings.notion_file_token.get_secret_value()
         self.session.headers.update(
             {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:139.0) Gecko/20100101 Firefox/139.0",
                 "x-notion-space-id": self.settings.notion_space_id,
-                "Cookie": f"{self.TOKEN_V2}={token_v2}; {self.FILE_TOKEN}={file_token}",
                 "Content-Type": self.CONTENT_TYPE,
             },
         )
-        logger.debug(
-            "Session cookies set: %s=%s...%s, %s=%s...%s",
-            self.TOKEN_V2,
-            token_v2[:4],
-            token_v2[-4:],
-            self.FILE_TOKEN,
-            file_token[:4],
-            file_token[-4:],
-        )
+        # A separate cookie-free session prevents Notion-specific headers and
+        # credentials from reaching signed object-storage download hosts.
+        self.public_session.headers.update({"User-Agent": self.session.headers["User-Agent"]})
+        for domain in self.NOTION_COOKIE_DOMAINS:
+            # Both cookies are intentionally available only to Notion-owned
+            # HTTPS hosts because current export downloads can require both.
+            self.session.cookies.set(self.TOKEN_V2, token_v2, domain=domain, path="/", secure=True)
+            self.session.cookies.set(self.FILE_TOKEN, file_token, domain=domain, path="/", secure=True)
+        logger.debug("Notion session cookies configured for approved domains")
 
         logger.info("Notion client initialized")
 
@@ -117,21 +125,19 @@ class NotionClient:
                 logger.error(msg)
                 return ConnectionResult(success=False, message=msg)
 
+            if response.status_code == 429:
+                # A rate limit says nothing about credential validity. Allow
+                # backup/recovery work to continue and make the uncertainty visible.
+                msg = "Notion credential verification was rate limited (HTTP 429); continuing without verification"
+                logger.warning(msg)
+                return ConnectionResult(success=True, message=msg, warning=True)
+
             if response.status_code != 200:
                 msg = f"Notion API returned HTTP {response.status_code}"
                 logger.error(msg)
                 return ConnectionResult(success=False, message=msg)
 
-            data = response.json()
-            # getSpaces returns a dict keyed by user ID, with the space map
-            # nested under each user's "space" key (older responses had
-            # "space" at the top level). Handle both shapes.
-            spaces: dict[str, Any] = {}
-            if isinstance(data.get("space"), dict):
-                spaces.update(data["space"])
-            for user_payload in data.values():
-                if isinstance(user_payload, dict) and isinstance(user_payload.get("space"), dict):
-                    spaces.update(user_payload["space"])
+            spaces = self._extract_spaces(response.json())
 
             if self.settings.notion_space_id not in spaces:
                 msg = f"Notion space '{self.settings.notion_space_id}' not found for this token"
@@ -166,6 +172,22 @@ class NotionClient:
             logger.exception(msg)
             return ConnectionResult(success=False, message=msg)
 
+    @staticmethod
+    def _extract_spaces(data: Any) -> dict[str, Any]:
+        """Normalize current and legacy getSpaces response shapes."""
+        if not isinstance(data, dict):
+            return {}
+
+        # Current responses nest spaces under each user, while older responses
+        # exposed a top-level map; combining both keeps one validation path.
+        spaces: dict[str, Any] = {}
+        if isinstance(data.get("space"), dict):
+            spaces.update(data["space"])
+        for user_payload in data.values():
+            if isinstance(user_payload, dict) and isinstance(user_payload.get("space"), dict):
+                spaces.update(user_payload["space"])
+        return spaces
+
     @retry_async(max_retries=3, delay=5.0)
     async def export_workspace(
         self,
@@ -196,19 +218,24 @@ class NotionClient:
                 export_started_at_ms = int(time.time() * 1000)
 
                 # Phase 1: Trigger export task
-                task_id = await self._trigger_export_task()
-                if not task_id:
+                triggered_task_id = await self._trigger_export_task()
+                if not triggered_task_id:
                     logger.error("Failed to trigger export task")
                     return ExportResult(file=None, failure=ExportFailure.TRIGGER_FAILED)
+                task_id = triggered_task_id
 
                 logger.debug("Export task triggered successfully with task ID: %s", task_id)
                 save_session(self.settings.notion_space_id, task_id, export_started_at_ms)
 
-            # Phase 2: Poll for task completion (returns True on success)
-            task_succeeded = await self._poll_task_completion(task_id)
-            if not task_succeeded:
-                logger.error("Failed to get task completion status")
+            # Preserve the distinction between an explicit Notion failure and
+            # a transient polling timeout so only dead tasks lose resume state.
+            task_poll_result = await self._poll_task_completion(task_id)
+            if task_poll_result == TaskPollResult.FAILED:
+                logger.error("Notion reported that the export task failed")
                 return ExportResult(file=None, failure=ExportFailure.TASK_FAILED)
+            if task_poll_result == TaskPollResult.TIMED_OUT:
+                logger.error("Export task did not finish within the polling window")
+                return ExportResult(file=None, failure=ExportFailure.TASK_NOT_READY)
 
             logger.info("Export task completed successfully")
 
@@ -257,9 +284,10 @@ class NotionClient:
         """
         max_wait_time = self.settings.max_export_wait_time
         check_interval = self.settings.export_poll_interval
-        elapsed_time = 0
+        started_at = time.monotonic()
+        deadline = started_at + max_wait_time
 
-        while elapsed_time < max_wait_time:
+        while time.monotonic() < deadline:
             notifications = await self.get_notifications()
             if notifications:
                 msg = f"Received {len(notifications.get('notificationIds', []))} notifications."
@@ -276,13 +304,17 @@ class NotionClient:
             else:
                 logger.info("No notifications received on this poll")
 
-            await asyncio.sleep(check_interval)
-            elapsed_time += check_interval
+            # Sleep no longer than the remaining deadline so the configured
+            # maximum is a real wall-clock bound rather than an iteration count.
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining == 0:
+                break
+            await asyncio.sleep(min(check_interval, remaining))
+            elapsed_time = int(time.monotonic() - started_at)
             logger.info("Waiting for download URL to become available... (%d seconds)", elapsed_time)
 
         logger.error(
-            "Download URL did not become available within %d seconds "
-            "(configurable via MAX_EXPORT_WAIT_TIME)",
+            "Download URL did not become available within %d seconds (configurable via MAX_EXPORT_WAIT_TIME)",
             max_wait_time,
         )
         return None
@@ -341,47 +373,50 @@ class NotionClient:
 
         return None
 
-    async def _poll_task_completion(self, task_id: str) -> bool:
+    async def _poll_task_completion(self, task_id: str) -> TaskPollResult:
         """Poll for task completion.
 
         Notion no longer returns an enqueuedAt timestamp in the getTasks
         response (breaking API change ~Jan 2025).  We now simply wait for
         the task state to become 'success'.
 
-        Returns True if the task succeeded, False otherwise.
+        Returns a distinct permanent failure or transient timeout outcome.
         """
         task_data = {"taskIds": [task_id]}
         max_wait_time = self.settings.max_export_wait_time
         check_interval = self.settings.export_poll_interval
-        elapsed_time = 0
+        started_at = time.monotonic()
+        deadline = started_at + max_wait_time
 
-        while elapsed_time < max_wait_time:
+        while time.monotonic() < deadline:
             result = await self._poll_once(task_data)
-            # True  -> task succeeded
-            # False -> task failed (non-retryable)
-            # None  -> still in progress, keep polling
+            # Only an explicit failure state is permanent; missing responses,
+            # rate limits, and network failures remain resumable until timeout.
             if result is True:
-                return True
+                return TaskPollResult.SUCCESS
             if result is False:
-                return False
-            await asyncio.sleep(check_interval)
-            elapsed_time += check_interval
+                return TaskPollResult.FAILED
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining == 0:
+                break
+            await asyncio.sleep(min(check_interval, remaining))
+            elapsed_time = int(time.monotonic() - started_at)
             logger.info("Waiting for export task to complete... (%d seconds)", elapsed_time)
 
         logger.error(
             "Export task did not complete within %d seconds (configurable via MAX_EXPORT_WAIT_TIME)",
             max_wait_time,
         )
-        return False
+        return TaskPollResult.TIMED_OUT
 
     async def _poll_once(self, task_data: dict[str, Any]) -> bool | None:
         """Poll Notion for task status once.
 
         Returns
         -------
-            True  – task completed successfully.
-            False – task failed (stop polling).
-            None  – task still in progress (continue polling).
+            True: task completed successfully.
+            False: task failed (stop polling).
+            None: task still in progress (continue polling).
         """
         try:
             response = self.session.post(
@@ -399,7 +434,6 @@ class NotionClient:
                 return None
 
             data = response.json()
-            logger.debug("Task polling response: \n%s", json.dumps(data, indent=2))
             results = data.get("results", [])
             if not results:
                 return None
@@ -449,7 +483,9 @@ class NotionClient:
                 return None
             if response.status_code == 200:
                 return response.json()  # type: ignore[no-any-return]
-            logger.warning("Failed to fetch notifications (HTTP %d): %s", response.status_code, response.text)
+            # Response bodies can contain workspace metadata or signed links,
+            # so diagnostics expose only the status code.
+            logger.warning("Failed to fetch notifications (HTTP %d)", response.status_code)
             return None
 
     def extract_download_url_from_notifications(
@@ -529,8 +565,8 @@ class NotionClient:
     async def _download_file(self, download_url: str, temp_dir: Path) -> Path | None:
         """Download the export file with retry for transient errors.
 
-        The session carries both the token_v2 and file_token cookies, matching
-        what the Notion web app sends to file.notion.com.
+        Notion cookies are sent only to approved HTTPS Notion hosts. External
+        signed storage URLs are downloaded with a cookie-free request.
         """
         timestamp = get_timestamp_string()
         flattened_suffix = "-flattened" if self.settings.flatten_export_filetree else ""
@@ -541,29 +577,38 @@ class NotionClient:
         max_retries = self.settings.max_retries
         base_delay = self.settings.retry_delay
         max_delay = self.settings.max_retry_delay
+        use_notion_session = self._is_notion_url(download_url)
+        safe_download_url = self._safe_url_for_logging(download_url)
 
         for attempt in range(max_retries):
             try:
                 logger.info("Downloading export file: %s (attempt %d/%d)", filename, attempt + 1, max_retries)
 
-                response = self.session.get(
-                    download_url,
-                    stream=True,
-                    timeout=self.settings.download_timeout,
-                )
+                if use_notion_session:
+                    # The cookie jar attaches credentials only to approved
+                    # Notion domains and strips them on cross-domain redirects.
+                    response = self.session.get(
+                        download_url,
+                        stream=True,
+                        timeout=self.settings.download_timeout,
+                    )
+                else:
+                    # Signed CDN/object-storage links authorize via their URL;
+                    # never add Notion session credentials to those requests.
+                    response = self.public_session.get(
+                        download_url,
+                        stream=True,
+                        timeout=self.settings.download_timeout,
+                    )
                 response.raise_for_status()
 
                 total_size = int(response.headers.get("content-length", 0))
                 self._write_response_to_file(response, file_path, total_size)
 
-                file_size = file_path.stat().st_size
-                logger.info("Download completed: %s (%d bytes)", filename, file_size)
-                return file_path
-
-            except requests.HTTPError as e:
-                status_code = e.response.status_code if e.response is not None else None
-                if status_code == 403:
-                    return self._handle_forbidden_download(e, download_url, file_path)
+            except requests.HTTPError as error:
+                status_code = error.response.status_code if error.response is not None else None
+                if status_code == 403 and use_notion_session:
+                    return self._handle_forbidden_download(download_url, file_path)
                 if attempt < max_retries - 1 and status_code is not None and status_code >= 500:
                     delay = min(base_delay * (2**attempt), max_delay)
                     logger.warning(
@@ -575,12 +620,28 @@ class NotionClient:
                     )
                     await asyncio.sleep(delay)
                 else:
-                    logger.exception("Failed to download file")
+                    # Signed URL query parameters are credentials, so avoid
+                    # exception text and log only a query-free URL.
+                    logger.error(  # noqa: TRY400 - exception logging would expose the signed URL
+                        "Download failed for %s (HTTP %s)",
+                        safe_download_url,
+                        status_code or "unknown",
+                    )
                     return None
 
-            except Exception:
-                logger.exception("Failed to download file")
+            except Exception as error:
+                # Exception messages can embed the full request URL, including
+                # its signature, so report only the type and sanitized target.
+                logger.error(  # noqa: TRY400 - exception logging would expose the signed URL
+                    "Download failed for %s (%s)",
+                    safe_download_url,
+                    type(error).__name__,
+                )
                 return None
+            else:
+                file_size = file_path.stat().st_size
+                logger.info("Download completed: %s (%d bytes)", filename, file_size)
+                return file_path
 
         return None
 
@@ -603,22 +664,37 @@ class NotionClient:
                         )
         return downloaded
 
-    def _handle_forbidden_download(
-        self,
-        error: requests.HTTPError,
-        download_url: str,
-        file_path: Path,
-    ) -> Path | None:
-        """Handle a 403 download: log the CDN's reason and try without cookies.
+    @classmethod
+    def _is_notion_url(cls, url: str) -> bool:
+        """Return whether a URL is HTTPS and belongs to a Notion-controlled domain."""
+        try:
+            parsed = urlsplit(url)
+            hostname = (parsed.hostname or "").lower()
+        except ValueError:
+            # Malformed remote data must never bypass the credential boundary.
+            return False
+        if parsed.scheme.lower() != "https":
+            return False
+        return any(hostname == domain[1:] or hostname.endswith(domain) for domain in cls.NOTION_COOKIE_DOMAINS)
+
+    @staticmethod
+    def _safe_url_for_logging(url: str) -> str:
+        """Return a URL without query, fragment, credentials, or other signed material."""
+        try:
+            parsed = urlsplit(url)
+            hostname = parsed.hostname or "<unknown-host>"
+            port = f":{parsed.port}" if parsed.port is not None else ""
+        except ValueError:
+            # Do not echo malformed input because it may itself contain secrets.
+            return "<invalid-url>"
+        return f"{parsed.scheme or '<unknown-scheme>'}://{hostname}{port}{parsed.path}"
+
+    def _handle_forbidden_download(self, download_url: str, file_path: Path) -> Path | None:
+        """Handle a 403 from Notion by retrying the signed URL without cookies.
 
         Returns the downloaded file if the no-cookie fallback succeeds, else None.
         """
-        if error.response is not None:
-            logger.error(
-                "Download forbidden (HTTP 403) for %s. Response body: %s",
-                error.response.url,
-                error.response.text[:500],
-            )
+        logger.error("Download forbidden (HTTP 403) for %s", self._safe_url_for_logging(download_url))
 
         # The signed URL may be self-sufficient (the signature is the
         # authorization); an invalid file_token cookie can also cause a 403,
@@ -646,22 +722,22 @@ class NotionClient:
         link is dead - an invalid file_token cookie can also cause a 403.
         """
         try:
-            response = requests.get(
+            response = self.public_session.get(
                 download_url,
                 stream=True,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:139.0) "
-                        "Gecko/20100101 Firefox/139.0"
-                    ),
-                },
                 timeout=self.settings.download_timeout,
             )
             response.raise_for_status()
 
             self._write_response_to_file(response, file_path, 0)
-        except Exception:
-            logger.debug("Download without cookies failed", exc_info=True)
+        except Exception as error:
+            # Avoid exception text because Requests can include the signed URL
+            # in it; the type is sufficient for safe debug diagnostics.
+            logger.debug(
+                "Download without cookies failed for %s (%s)",
+                self._safe_url_for_logging(download_url),
+                type(error).__name__,
+            )
             file_path.unlink(missing_ok=True)
             return None
 

@@ -101,7 +101,7 @@ python main.py cleanup --keep 5
 
 ### 6. Verify Credentials
 
-Before running a backup, the tool verifies your Notion credentials (token, file token, and space ID) via a lightweight API call — no export is triggered. This check runs automatically as part of the backup pre-flight, so invalid credentials fail fast before any export or recovery work begins.
+Before running a backup, the tool verifies `token_v2` and the space ID via a lightweight API call — no export is triggered. This check runs automatically as part of the backup pre-flight, so confirmed invalid credentials fail fast before any export or recovery work begins. An HTTP 429 rate limit is treated as inconclusive and allows the run to continue with a warning.
 
 You can also run the check on its own:
 
@@ -110,9 +110,9 @@ You can also run the check on its own:
 python main.py test
 ```
 
-If the credentials are invalid, the command exits with a non-zero status and a clear error message.
+If `token_v2` or the space ID is invalid, the command exits with a non-zero status and a clear error message.
 
-The `file_token` cookie (used for downloads) is also checked with a best-effort probe: if it appears expired, you'll see a warning suggesting you refresh `NOTION_FILE_TOKEN` from your browser. If downloads fail with HTTP 403, the `file_token` has likely expired — refresh it (Notion → DevTools → Network → any request → Cookies → `file_token`) and re-run; the backup session is preserved, so it will resume automatically. The tool sends both `token_v2` and `file_token` cookies on downloads (browser parity) and, if a 403 still occurs, retries once without cookies in case the signed URL is self-sufficient. If the 403 persists after refreshing the token, the old export link may be bound to a previous account/session — start a fresh export with `python main.py backup --skip-resume`.
+The `file_token` cookie (used for downloads) is checked only with a best-effort probe: an HTTP 403 produces a warning but does not fail the credential check. If downloads fail with HTTP 403, refresh `NOTION_FILE_TOKEN` from your browser and re-run; the backup session is preserved, so it will resume automatically. Notion cookies are sent only to HTTPS Notion hosts. External signed storage URLs are downloaded without them. If a cookie-authenticated download returns 403, the tool retries once without cookies in case the signed URL is self-sufficient. If the 403 persists after refreshing the token, the old export link may be bound to a previous account/session — start a fresh export with `python main.py backup --skip-resume`.
 
 ## 🐳 Docker
 
@@ -431,10 +431,11 @@ python main.py --debug backup
 Debug output includes:
 
 - Environment info (Python version, platform, `requests` version)
-- The exact export request payload sent to Notion
-- Full response details for every Notion API call: status code, URL, and body
-- Rate-limit headers (`Retry-After`, `X-RateLimit-*`) when Notion throttles the
-  request — use these to confirm a genuine HTTP 429 rate limit vs. a coding issue
+- Export task IDs, task states, page counts, and retry progress
+- HTTP status codes and download hosts/paths with query signatures redacted
+- Rate-limit events when Notion throttles a request
+
+Debug output never includes token characters, response bodies, or signed URL query parameters.
 
 ### Testing Configuration
 

@@ -158,4 +158,4 @@ Test your configuration with:
 python main.py test
 ```
 
-This will validate all settings, show any parsing issues, and verify your Notion credentials (token, file token, and space ID) via a lightweight API call — no export is triggered. If the credentials are invalid, the command exits with a non-zero status and a clear error message. 
+This validates all settings and verifies `token_v2` and the space ID via a lightweight API call; no export is triggered. The `file_token` probe is best-effort, so an HTTP 403 produces a warning without failing the command. Confirmed invalid `token_v2` or space ID values exit with a non-zero status and a clear error message.

@@ -172,7 +172,9 @@ Created in dry-run mode at {timestamp}.
                             export_result.failure,
                             resume_task_id or "new task",
                         )
-                    error_message = "Failed to export from Notion"
+                    # Surface the typed reason so operators know whether the
+                    # saved task can be resumed or a fresh export is required.
+                    error_message = f"Failed to export from Notion ({export_result.failure})"
                     return False
 
                 backup_file = export_result.file
@@ -331,8 +333,8 @@ Created in dry-run mode at {timestamp}.
             RecoveryResult indicating whether recovery was successful.
         """
         task_id = export.get("task_id")
-        # enqueued_at now stores the wall-clock time (ms) when the export
-        # was triggered – used to filter stale notifications.
+        # enqueued_at stores the wall-clock time (ms) when the export was
+        # triggered, which filters stale notifications.
         started_after_ms = export.get("enqueued_at", 0)
         retry_count = export.get("retry_count", 0)
         max_retries = self.settings.max_retries
@@ -523,7 +525,11 @@ Created in dry-run mode at {timestamp}.
         # export/recovery work begins.
         if not dry_run:
             notion_test = await self.notion_client.test_connection()
-            if notion_test.success:
+            if notion_test.success and notion_test.warning:
+                # Rate limiting is inconclusive rather than an authentication
+                # failure, so continue while keeping the degraded check visible.
+                logger.warning("⚠ Notion credentials: %s", notion_test.message)
+            elif notion_test.success:
                 logger.info("✓ Notion credentials: %s", notion_test.message)
             else:
                 logger.error("✗ Notion credentials failed: %s", notion_test.message)

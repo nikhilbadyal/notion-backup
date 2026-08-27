@@ -15,6 +15,7 @@ class RedisClient:
     """A client for interacting with Redis for export recovery."""
 
     RECOVERY_QUEUE_KEY = "notion_backup_recovery_queue"
+    QUEUE_UPDATE_RETRIES = 5
 
     def __init__(self, settings: Settings) -> None:
         """
@@ -52,7 +53,6 @@ class RedisClient:
                 decode_responses=True,
                 socket_connect_timeout=5,
                 socket_timeout=5,
-                retry_on_timeout=True,
                 **ssl_params,
             )
             client.ping()
@@ -108,32 +108,88 @@ class RedisClient:
             logger.warning("Redis not available, cannot push pending export")
             return
 
-        try:
-            task_id = export_data.get("task_id", "unknown")
-            retry_count = export_data.get("retry_count", 0)
+        task_id = export_data.get("task_id", "unknown")
+        retry_count = int(export_data.get("retry_count", 0))
+        payload = json.dumps(export_data)
 
-            # Avoid duplicate queue entries for the same task: if the task is
-            # already queued, keep the existing entry (which has the higher
-            # retry_count) and skip the push.
-            existing_items = self.client.lrange(self.RECOVERY_QUEUE_KEY, 0, -1)
-            for item in existing_items:
+        for transaction_attempt in range(1, self.QUEUE_UPDATE_RETRIES + 1):
+            try:
+                updated, stored_retry_count = self._queue_export_transaction(task_id, retry_count, payload)
+            except redis.exceptions.WatchError:
+                logger.debug(
+                    "Recovery queue changed while updating task %s; retrying transaction (%d/%d)",
+                    task_id,
+                    transaction_attempt,
+                    self.QUEUE_UPDATE_RETRIES,
+                )
+            except Exception:
+                logger.exception("Failed to push pending export to Redis")
+                return
+            else:
+                if updated:
+                    logger.info("Queued pending export task in Redis: %s (retry %d)", task_id, retry_count)
+                else:
+                    logger.info(
+                        "Task %s already in recovery queue (retry %d), skipping stale retry %d",
+                        task_id,
+                        stored_retry_count,
+                        retry_count,
+                    )
+                return
+
+        logger.warning(
+            "Recovery queue remained busy; task %s was not queued after %d atomic attempts",
+            task_id,
+            self.QUEUE_UPDATE_RETRIES,
+        )
+
+    def _queue_export_transaction(self, task_id: Any, retry_count: int, payload: str) -> tuple[bool, int]:
+        """Atomically insert a task or replace it with higher retry metadata."""
+        if self.client is None:
+            msg = "Redis connection disappeared before queue transaction"
+            raise RuntimeError(msg)
+
+        # WATCH makes the read/compare/write decision atomic across concurrent
+        # backup processes sharing the recovery queue.
+        with self.client.pipeline() as pipe:
+            pipe.watch(self.RECOVERY_QUEUE_KEY)
+            existing_items = pipe.lrange(self.RECOVERY_QUEUE_KEY, 0, -1)
+            matching_index: int | None = None
+            existing_retry_count = -1
+
+            for index, item in enumerate(existing_items):
                 try:
                     existing = json.loads(item)
                 except json.JSONDecodeError:
+                    # Preserve malformed entries so queue repair remains a
+                    # separate, explicit operation.
                     continue
-                if existing.get("task_id") == task_id:
-                    logger.info(
-                        "Task %s already in recovery queue (retry %d), skipping duplicate push",
-                        task_id,
-                        existing.get("retry_count", 0),
-                    )
-                    return
+                if isinstance(existing, dict) and existing.get("task_id") == task_id:
+                    matching_index = index
+                    try:
+                        existing_retry_count = int(existing.get("retry_count", 0))
+                    except (TypeError, ValueError):
+                        # Treat invalid legacy metadata as the initial attempt
+                        # so a valid retry can replace it.
+                        existing_retry_count = 0
+                    break
 
-            payload = json.dumps(export_data)
-            self.client.rpush(self.RECOVERY_QUEUE_KEY, payload)
-            logger.info("Pushed pending export task to Redis recovery queue: %s (retry %d)", task_id, retry_count)
-        except Exception:
-            logger.exception("Failed to push pending export to Redis")
+            if matching_index is not None and existing_retry_count >= retry_count:
+                # Commit an empty transaction so Redis still verifies that the
+                # matching entry was not removed between LRANGE and this decision.
+                pipe.multi()
+                pipe.execute()
+                return False, existing_retry_count
+
+            pipe.multi()
+            if matching_index is None:
+                pipe.rpush(self.RECOVERY_QUEUE_KEY, payload)
+            else:
+                # Replace stale metadata in place so queue ordering is stable
+                # while retry progress moves monotonically forward.
+                pipe.lset(self.RECOVERY_QUEUE_KEY, matching_index, payload)
+            pipe.execute()
+            return True, retry_count
 
     def get_pending_exports(self) -> list[dict[str, Any]]:
         """
