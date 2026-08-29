@@ -25,8 +25,15 @@ class NotionClient:
     API_VERSION = "v3"
     ENQUEUE_ENDPOINT = f"{BASE_URL}/{API_VERSION}/enqueueTask"
     GET_TASKS_ENDPOINT = f"{BASE_URL}/{API_VERSION}/getTasks"
-    NOTIFICATION_ENDPOINT = f"{BASE_URL}/{API_VERSION}/getNotificationLogV2"
-    MARK_READ_ENDPOINT = f"{BASE_URL}/{API_VERSION}/saveTransactionsMain"
+    # Notifications/inbox moved to app.notion.com after Notion's notion.com
+    # migration: getNotificationLogV2 on www.notion.so returns an empty feed for
+    # accounts whose session lives on app.notion.com, so the export-completed
+    # activity that carries the download link is never found. Fetch notifications
+    # and mark-read from app.notion.com instead; enqueue/getTasks still work on
+    # www.notion.so.
+    NOTIFICATION_BASE = "https://app.notion.com/api"
+    NOTIFICATION_ENDPOINT = f"{NOTIFICATION_BASE}/{API_VERSION}/getNotificationLogV2"
+    MARK_READ_ENDPOINT = f"{NOTIFICATION_BASE}/{API_VERSION}/saveTransactionsMain"
     CONTENT_TYPE = "application/json"
 
     TOKEN_V2 = "token_v2"  # noqa: S105
