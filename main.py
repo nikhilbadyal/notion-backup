@@ -4,15 +4,20 @@ Notion Backup - Modular Version
 Automatically backup your Notion workspace with pluggable storage and notification backends.
 """
 
+import asyncio
 import logging
 import sys
 
 import click
+import requests
 from pydantic import ValidationError
 
 from src.config import Settings
 from src.core import cleanup_backups_sync, list_backups_sync, run_backup_sync
+from src.core.client import NotionClient
 from src.utils import format_file_size
+
+logger = logging.getLogger(__name__)
 
 
 def setup_logging(debug: bool = False) -> None:
@@ -58,6 +63,12 @@ def cli(ctx: click.Context, debug: bool, dry_run: bool) -> None:
     """Notion Backup - Modular backup tool for Notion workspaces."""
     # Set up logging
     setup_logging(debug)
+
+    if debug:
+        logger.debug("Debug mode enabled")
+        logger.debug("Python: %s", sys.version.replace("\n", " "))
+        logger.debug("Platform: %s", sys.platform)
+        logger.debug("requests version: %s", requests.__version__)
 
     # Store flags in context for commands to access
     ctx.ensure_object(dict)
@@ -165,8 +176,20 @@ def test(_: click.Context) -> None:
     click.echo("🔧 Testing configuration...")
     click.echo(f"📦 Storage Backend: {settings.storage_backend.value}")
 
-    # Test would be implemented here
-    click.echo("✅ Configuration test passed!")
+    # Verify Notion credentials without triggering an export
+    click.echo("🔑 Verifying Notion credentials...")
+    client = NotionClient(settings)
+    result = asyncio.run(client.test_connection())
+
+    if result.success and result.warning:
+        # A transient rate limit is inconclusive, so distinguish it from a
+        # verified credential success without making the command fail.
+        click.echo(f"⚠️  {result.message}", err=True)
+    elif result.success:
+        click.echo(f"✅ {result.message}")
+    else:
+        click.echo(f"❌ {result.message}", err=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
