@@ -187,6 +187,11 @@ class FakeRedis:
         self.queue[index] = value
         return True
 
+    def delete(self, _key: str) -> int:
+        count = len(self.queue)
+        self.queue.clear()
+        return count
+
     def pipeline(self) -> "FakePipeline":
         return FakePipeline(self)
 
@@ -210,10 +215,16 @@ class FakePipeline:
         return
 
     def multi(self) -> None:
-        return
+        self.commands.clear()
 
     def lrange(self, key: str, start: int, end: int) -> list[str]:
-        return self.client.lrange(key, start, end)
+        items = self.client.lrange(key, start, end)
+        self.commands.append(("lrange", (key, start, end)))
+        return items
+
+    def delete(self, key: str) -> "FakePipeline":
+        self.commands.append(("delete", (key,)))
+        return self
 
     def rpush(self, key: str, *values: str) -> "FakePipeline":
         self.commands.append(("rpush", (key, *values)))
@@ -261,6 +272,28 @@ class TestRecoveryQueueDedupe:
 
         assert len(fake_redis.queue) == 1
         assert json.loads(fake_redis.queue[0])["retry_count"] == 2
+
+    def test_get_pending_exports_recovers_valid_despite_malformed_entry(self) -> None:
+        """Malformed entries must not discard valid pending exports."""
+        client = RedisClient(make_settings())
+        fake_redis = FakeRedis()
+        client.client = fake_redis
+        fake_redis.queue = [
+            json.dumps({"task_id": "task-valid-1", "enqueued_at": 1000}),
+            "{not valid json",
+            json.dumps("not-a-dict"),
+            json.dumps({"task_id": "task-valid-2", "enqueued_at": 2000}),
+        ]
+
+        pending = client.get_pending_exports()
+
+        # Both valid entries must be returned despite malformed JSON and non-dict entries
+        assert len(pending) == 2
+        assert pending[0]["task_id"] == "task-valid-1"
+        assert pending[1]["task_id"] == "task-valid-2"
+        # Malformed entries must be preserved in the queue for inspection/repair
+        assert len(fake_redis.queue) == 2
+        assert "{not valid json" in fake_redis.queue
 
 
 # ---------------------------------------------------------------------------
@@ -606,3 +639,63 @@ class TestDownloadFile403:
         assert result.success is True
         # The probe must have been sent (the session carries the file_token cookie)
         session.get.assert_called_once()
+
+    def test_download_rejects_insecure_http_url(self, tmp_path: Path) -> None:
+        """Download URL with http:// scheme must be rejected to prevent cleartext transport (CWE-319)."""
+        client = NotionClient(make_settings())
+        session = MagicMock()
+        client.session = session
+        client.public_session = session
+
+        result = asyncio.run(client._download_file("http://notion.so/export.zip", tmp_path))  # noqa: SLF001
+        assert result is None
+        session.get.assert_not_called()
+
+    def test_download_rejects_insecure_http_redirect(self, tmp_path: Path) -> None:
+        """Download URL that redirects to insecure http:// must be rejected."""
+        client = NotionClient(make_settings())
+        session = MagicMock()
+        response = MagicMock()
+        response.status_code = 200
+        # Final URL is insecure
+        response.url = "http://insecure-cdn.com/export.zip"
+        redirect_hop = MagicMock()
+        redirect_hop.url = "https://notion.so/export.zip"
+        response.history = [redirect_hop]
+        session.get.return_value = response
+        client.public_session = session
+
+        result = asyncio.run(client._download_file("https://notion.so/export.zip", tmp_path))  # noqa: SLF001
+        assert result is None
+
+    def test_download_without_cookies_rejects_insecure_http_url(self, tmp_path: Path) -> None:
+        """_download_without_cookies must reject non-HTTPS URLs."""
+        client = NotionClient(make_settings())
+        session = MagicMock()
+        client.public_session = session
+
+        result = client._download_without_cookies("http://cdn.com/export.zip", tmp_path / "test.zip")  # noqa: SLF001
+        assert result is None
+        session.get.assert_not_called()
+
+    def test_wait_for_download_url_handles_non_positive_interval(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """export_poll_interval <= 0 must be clamped to at least 1 second to avoid infinite spin loop."""
+        settings = make_settings()
+        # Direct attribute assignment simulating non-positive interval
+        object.__setattr__(settings, "export_poll_interval", 0)
+        object.__setattr__(settings, "max_export_wait_time", 2)
+        client = NotionClient(settings)
+
+        sleep_calls: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleep_calls.append(seconds)
+
+        monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+        client.get_notifications = AsyncMock(return_value={})  # type: ignore[method-assign]
+
+        result = asyncio.run(client._wait_for_download_url("task-123", 1000))  # noqa: SLF001
+        assert result is None
+        assert len(sleep_calls) > 0
+        assert sleep_calls[0] == 1.0
+        assert all(s > 0 for s in sleep_calls)

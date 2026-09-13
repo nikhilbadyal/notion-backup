@@ -221,7 +221,28 @@ class RedisClient:
             if not items:
                 return []
 
-            pending_tasks = [json.loads(item) for item in items]
+            pending_tasks: list[dict[str, Any]] = []
+            malformed_items: list[str] = []
+
+            # Parse each queue entry independently so a single malformed or corrupted
+            # payload does not cause the entire batch of valid pending exports to be lost.
+            for item in items:
+                try:
+                    data = json.loads(item)
+                    if isinstance(data, dict):
+                        pending_tasks.append(data)
+                    else:
+                        logger.warning("Ignoring non-dictionary item in recovery queue: %s", item)
+                        malformed_items.append(item)
+                except json.JSONDecodeError:
+                    logger.warning("Ignoring malformed JSON item in recovery queue: %s", item)
+                    malformed_items.append(item)
+
+            # Re-enqueue any malformed items so that queue inspection and repair remains
+            # possible, without blocking recovery of all other valid records.
+            if malformed_items:
+                self.client.rpush(self.RECOVERY_QUEUE_KEY, *malformed_items)
+
             logger.info("Retrieved %d pending export tasks from Redis.", len(pending_tasks))
 
         except Exception:

@@ -283,7 +283,9 @@ class NotionClient:
             configured wait window.
         """
         max_wait_time = self.settings.max_export_wait_time
-        check_interval = self.settings.export_poll_interval
+        # Enforce a strictly positive polling interval to prevent an infinite zero-delay
+        # spin loop if configuration or caller provides a non-positive interval.
+        check_interval = max(self.settings.export_poll_interval, 1)
         started_at = time.monotonic()
         deadline = started_at + max_wait_time
 
@@ -384,7 +386,9 @@ class NotionClient:
         """
         task_data = {"taskIds": [task_id]}
         max_wait_time = self.settings.max_export_wait_time
-        check_interval = self.settings.export_poll_interval
+        # Enforce a strictly positive polling interval to ensure elapsed time advances
+        # and prevent unthrottled API requests if export_poll_interval is non-positive.
+        check_interval = max(self.settings.export_poll_interval, 1)
         started_at = time.monotonic()
         deadline = started_at + max_wait_time
 
@@ -580,6 +584,13 @@ class NotionClient:
         use_notion_session = self._is_notion_url(download_url)
         safe_download_url = self._safe_url_for_logging(download_url)
 
+        # Reject non-HTTPS URLs to prevent cleartext transmission of signed credentials
+        # and export data over insecure networks (CWE-319).
+        parsed_url = urlsplit(download_url)
+        if (parsed_url.scheme or "").lower() != "https":
+            logger.error("Download URL must use HTTPS: %s", safe_download_url)
+            return None
+
         for attempt in range(max_retries):
             try:
                 logger.info("Downloading export file: %s (attempt %d/%d)", filename, attempt + 1, max_retries)
@@ -601,6 +612,20 @@ class NotionClient:
                         timeout=self.settings.download_timeout,
                     )
                 response.raise_for_status()
+
+                # Ensure no redirect hop downgraded transport to insecure cleartext HTTP
+                response_url = response.url if isinstance(getattr(response, "url", None), str) else download_url
+                history = response.history if isinstance(getattr(response, "history", None), list | tuple) else []
+                if (urlsplit(response_url).scheme or "").lower() != "https" or any(
+                    (urlsplit(r.url).scheme or "").lower() != "https"
+                    for r in history
+                    if isinstance(getattr(r, "url", None), str)
+                ):
+                    logger.error(
+                        "Insecure non-HTTPS redirect detected during export download for %s",
+                        safe_download_url,
+                    )
+                    return None
 
                 total_size = int(response.headers.get("content-length", 0))
                 self._write_response_to_file(response, file_path, total_size)
@@ -721,6 +746,12 @@ class NotionClient:
         authorization), so a 403 with cookies does not necessarily mean the
         link is dead - an invalid file_token cookie can also cause a 403.
         """
+        # Reject non-HTTPS URLs to prevent cleartext exposure of signed download credentials (CWE-319)
+        parsed_url = urlsplit(download_url)
+        if (parsed_url.scheme or "").lower() != "https":
+            logger.error("Download URL must use HTTPS: %s", self._safe_url_for_logging(download_url))
+            return None
+
         try:
             response = self.public_session.get(
                 download_url,
@@ -728,6 +759,21 @@ class NotionClient:
                 timeout=self.settings.download_timeout,
             )
             response.raise_for_status()
+
+            # Ensure no redirect hop downgraded transport to insecure cleartext HTTP
+            response_url = response.url if isinstance(getattr(response, "url", None), str) else download_url
+            history = response.history if isinstance(getattr(response, "history", None), list | tuple) else []
+            if (urlsplit(response_url).scheme or "").lower() != "https" or any(
+                (urlsplit(r.url).scheme or "").lower() != "https"
+                for r in history
+                if isinstance(getattr(r, "url", None), str)
+            ):
+                logger.error(
+                    "Insecure non-HTTPS redirect detected during export download for %s",
+                    self._safe_url_for_logging(download_url),
+                )
+                file_path.unlink(missing_ok=True)
+                return None
 
             self._write_response_to_file(response, file_path, 0)
         except Exception as error:

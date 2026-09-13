@@ -101,7 +101,7 @@ python main.py cleanup --keep 5
 
 ### 6. Verify Credentials
 
-Before running a backup, the tool verifies `token_v2` and the space ID via a lightweight API call — no export is triggered. This check runs automatically as part of the backup pre-flight, so confirmed invalid credentials fail fast before any export or recovery work begins. An HTTP 429 rate limit is treated as inconclusive and allows the run to continue with a warning.
+Before running a non-dry-run backup, the tool verifies `token_v2` and the space ID via a lightweight API call — no export is triggered. Dry-run mode skips the Notion API check. This check runs automatically as part of the backup pre-flight, so confirmed invalid credentials fail fast before any export or recovery work begins. An HTTP 429 rate limit is treated as inconclusive and allows the run to continue with a warning.
 
 You can also run the check on its own:
 
@@ -112,7 +112,7 @@ python main.py test
 
 If `token_v2` or the space ID is invalid, the command exits with a non-zero status and a clear error message.
 
-The `file_token` cookie (used for downloads) is checked only with a best-effort probe: an HTTP 403 produces a warning but does not fail the credential check. If downloads fail with HTTP 403, refresh `NOTION_FILE_TOKEN` from your browser and re-run; the backup session is preserved, so it will resume automatically. Notion cookies are sent only to HTTPS Notion hosts. External signed storage URLs are downloaded without them. If a cookie-authenticated download returns 403, the tool retries once without cookies in case the signed URL is self-sufficient. If the 403 persists after refreshing the token, the old export link may be bound to a previous account/session — start a fresh export with `python main.py backup --skip-resume`.
+The `file_token` cookie (used for downloads) is checked only with a best-effort probe: an HTTP 403 produces a warning but does not fail the credential check. If downloads fail with HTTP 403, refresh `NOTION_FILE_TOKEN` from your browser and rerun; the backup session is preserved, but interactive runs prompt before resuming while non-interactive runs start fresh. To resume directly, run `python main.py backup --resume`. Notion cookies are sent only to HTTPS Notion hosts. External signed storage URLs are downloaded without them. If a cookie-authenticated download returns 403, the tool retries once without cookies in case the signed URL is self-sufficient. If the 403 persists after refreshing the token, the old export link may be bound to a previous account/session — start a fresh export with `python main.py backup --skip-resume`.
 
 ## 🐳 Docker
 
