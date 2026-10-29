@@ -19,7 +19,7 @@ RUN git clone --depth 1 --branch "v${RCLONE_VER}" https://github.com/rclone/rclo
     -o /usr/local/bin/rclone .
 
 # Stage 2: Application image, built on the current Debian stable (trixie).
-FROM python:3.14-slim-trixie
+FROM python:3.15-slim-trixie
 
 # Pick up Debian security updates published after the base image was built.
 RUN apt-get update \
