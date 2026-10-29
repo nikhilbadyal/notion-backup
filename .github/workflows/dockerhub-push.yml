@@ -1,6 +1,9 @@
 name: Push Backup Image to DockerHub
 on:
   workflow_dispatch:
+  schedule:
+    # Rebuild daily so no-cache builds pick up newer base-image and OS security fixes.
+    - cron: '17 4 * * *'
   push:
     branches:
       - main
