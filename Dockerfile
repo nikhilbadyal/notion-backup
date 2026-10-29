@@ -1,22 +1,31 @@
-# Stage 1: Build the application with dependencies
-FROM python:3.14-slim-bookworm
+# Stage 1: Pinned rclone binary. The official image is multi-arch and its
+# static binary is copied out, so curl, unzip and the build toolchain never
+# reach the runtime image.
+FROM rclone/rclone:1.75.2 AS rclone
+
+# Stage 2: Application image, built on the current Debian stable (trixie).
+FROM python:3.14-slim-trixie
+
+# Pick up Debian security updates published after the base image was built.
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone
 
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies and rclone
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    curl \
-    unzip \
-    && curl https://rclone.org/install.sh | bash \
-    && rm -rf /var/lib/apt/lists/*
-
 # Copy requirements file
 COPY requirements.txt .
 
-# Install dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies, then drop pip/setuptools/wheel: they are only needed
+# at build time, and the copies vendored inside pip carry their own CVEs.
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir -r requirements.txt \
+    && python -m pip uninstall -y pip setuptools wheel \
+    && rm -rf /root/.cache/pip
 
 # Set non-root user
 RUN useradd --create-home appuser
