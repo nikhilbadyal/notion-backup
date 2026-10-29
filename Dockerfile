@@ -1,7 +1,22 @@
-# Stage 1: Pinned rclone binary. The official image is multi-arch and its
-# static binary is copied out, so curl, unzip and the build toolchain never
-# reach the runtime image.
-FROM rclone/rclone:1.75.2 AS rclone
+# Stage 1: Build rclone with a Go toolchain that carries the crypto/x509 fix
+# (CVE-2026-111943, fixed in Go 1.27.3). The rclone 1.75.2 release binaries are
+# built with an older Go. CGO is off, so the result is a static binary that the
+# runtime stage can copy without any of the build toolchain.
+FROM golang:1.27.3-trixie AS rclone
+
+ARG RCLONE_VER=1.75.2
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+RUN git clone --depth 1 --branch "v${RCLONE_VER}" https://github.com/rclone/rclone.git . \
+    && CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X github.com/rclone/rclone/fs.Version=v${RCLONE_VER}" \
+    -o /usr/local/bin/rclone .
 
 # Stage 2: Application image, built on the current Debian stable (trixie).
 FROM python:3.14-slim-trixie
