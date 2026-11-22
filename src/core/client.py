@@ -328,10 +328,18 @@ class NotionClient:
                 "eventName": "exportSpace",
                 "request": {
                     "spaceId": self.settings.notion_space_id,
+                    # Since ~2026-10-16 Notion accepts includePrivatePages on
+                    # exportSpace and defaults legacy payloads (no field) to
+                    # false: the task still succeeds but silently exports only
+                    # space-shared content, dropping pages gated to the
+                    # requesting user alone. includeContents "everything"
+                    # keeps pre-change behavior of bundling attached files.
+                    "includePrivatePages": True,
                     "exportOptions": {
                         "exportType": self.settings.export_type.value,
                         "timeZone": self.settings.time_zone,
                         "locale": "en",
+                        "includeContents": "everything",
                         "collectionViewExportType": "currentView",
                         "flattenExportFiletree": self.settings.flatten_export_filetree,
                     },
