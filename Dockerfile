@@ -2,7 +2,7 @@
 # (CVE-2026-111943, fixed in Go 1.27.3). The rclone 1.75.2 release binaries are
 # built with an older Go. CGO is off, so the result is a static binary that the
 # runtime stage can copy without any of the build toolchain.
-FROM golang:1.27.3-trixie AS rclone
+FROM golang:1.27.4-trixie AS rclone
 
 ARG RCLONE_VER=1.75.2
 
